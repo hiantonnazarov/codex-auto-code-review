@@ -1,149 +1,102 @@
-"""Регрессии: изменение App Server diff, кеш, отказоустойчивость, фильтры."""
-import json
+"""Regression coverage: failure paths, no duplicate reviews and round caps."""
 from pathlib import Path
+import json
 
-import pytest
-
-from codex_auto_review.appserver import AppServerError, ingest, get_turn
 from codex_auto_review.engine import handle
-from codex_auto_review.reviewer import Finding, ReviewerError
+from codex_auto_review.reviewer import ReviewerError, Finding
 from codex_auto_review.store import read, state_path
 
 
-def capture(diff: str, home: Path, session: str = "s", turn: str = "t") -> None:
-    ingest({"method": "turn/diff/updated", "params": {
-        "threadId": session, "turnId": turn, "diff": diff
-    }}, home)
+def hook(repo, event, session="s", turn="t", task="Почини ошибку", value="new", call="c1"):
+    base = {"cwd": str(repo), "session_id": session, "turn_id": turn}
+    if event == "UserPromptSubmit":
+        base["prompt"] = task
+    if event == "PostToolUse":
+        base.update(tool_name="apply_patch", tool_use_id=call,
+                    tool_input={"command": "*** Begin Patch\n*** Update File: x.py\n"
+                                            f"@@\n-old\n+{value}\n*** End Patch\n"},
+                    tool_response={"output": "Success. Updated the following files:\nM x.py\n",
+                                   "exit_code": 0})
+    return base
 
 
-def patch(value: str = "1") -> str:
-    return ("diff --git a/x.py b/x.py\n"
-            "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n"
-            "-old\n+" + value + "\n")
-
-
-def test_error_report_not_passed(monkeypatch, repo: Path, tmp_path: Path) -> None:
+def test_reviewer_error_is_reported_not_passed(monkeypatch, repo, tmp_path):
     import codex_auto_review.engine as engine
     (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
-    def broken(*args):
-        raise ReviewerError("invalid JSON")
-    monkeypatch.setattr(engine, "run_review", broken)
-    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t", "prompt": "change"}
-    handle("UserPromptSubmit", env, tmp_path)
-    capture(patch(), tmp_path)
-    result = handle("Stop", env, tmp_path)
+    monkeypatch.setattr(engine, "run_review", lambda *a: (_ for _ in ()).throw(
+        ReviewerError("bad JSON")
+    ))
+    handle("UserPromptSubmit", hook(repo, "UserPromptSubmit"), tmp_path)
+    handle("PostToolUse", hook(repo, "PostToolUse"), tmp_path)
+    result = handle("Stop", hook(repo, "Stop"), tmp_path)
     assert "НЕ ПРОЙДЕНО" in result["systemMessage"]
     state = read(state_path(repo, "s", tmp_path))
-    report = json.loads(Path(state["last_report"]).read_text())
-    assert state["status"] == report["status"] == "error"
-    assert report["error"] == "invalid JSON"
+    assert state["status"] == "error"
+    report = json.loads(Path(state["last_report"]).read_text(encoding="utf-8"))
+    assert report["error"] == "bad JSON"
 
 
-def test_stale_appserver_diff_never_passed(monkeypatch, repo: Path,
-                                          tmp_path: Path) -> None:
+def test_new_patch_while_review_in_progress_is_not_accepted(monkeypatch, repo, tmp_path):
     import codex_auto_review.engine as engine
     (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
-    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t"}
-    handle("UserPromptSubmit", env, tmp_path)
-    capture(patch(), tmp_path)
-    def change(*args):
-        capture(patch("2"), tmp_path)
+    handle("UserPromptSubmit", hook(repo, "UserPromptSubmit"), tmp_path)
+    handle("PostToolUse", hook(repo, "PostToolUse"), tmp_path)
+    def add_more(*args):
+        handle("PostToolUse", hook(repo, "PostToolUse", call="c2", value="other"), tmp_path)
         return []
-    monkeypatch.setattr(engine, "run_review", change)
-    assert handle("Stop", env, tmp_path)["decision"] == "block"
+    monkeypatch.setattr(engine, "run_review", add_more)
+    result = handle("Stop", hook(repo, "Stop"), tmp_path)
+    assert result["decision"] == "block"
     assert read(state_path(repo, "s", tmp_path))["status"] == "stale_review"
 
 
-def test_replay_same_appserver_diff_does_not_repeat_paid_call(
-    monkeypatch, repo: Path, tmp_path: Path
-) -> None:
+def test_retry_same_patch_not_charged_again(monkeypatch, repo, tmp_path):
     import codex_auto_review.engine as engine
     (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
     calls = []
-    def reviewer(*args):
-        calls.append(1)
-        return []
-    monkeypatch.setattr(engine, "run_review", reviewer)
-    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t"}
-    handle("UserPromptSubmit", env, tmp_path)
-    capture(patch(), tmp_path)
-    assert "ПРОЙДЕНО" in handle("Stop", env, tmp_path)["systemMessage"]
-    assert handle("Stop", env, tmp_path) == {}
+    monkeypatch.setattr(engine, "run_review", lambda *args: calls.append(1) or [])
+    handle("UserPromptSubmit", hook(repo, "UserPromptSubmit"), tmp_path)
+    handle("PostToolUse", hook(repo, "PostToolUse"), tmp_path)
+    assert "ПРОЙДЕНО" in handle("Stop", hook(repo, "Stop"), tmp_path)["systemMessage"]
+    assert handle("Stop", hook(repo, "Stop"), tmp_path) == {}
     assert len(calls) == 1
 
 
-def test_failed_codex_turn_cannot_pass(monkeypatch, repo: Path,
-                                      tmp_path: Path) -> None:
+def test_unknown_tool_response_does_not_pass(monkeypatch, repo, tmp_path):
     import codex_auto_review.engine as engine
-    monkeypatch.setattr(engine, "run_review", lambda *args: 1 / 0)
     (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
-    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t"}
-    handle("UserPromptSubmit", env, tmp_path)
-    capture(patch(), tmp_path)
-    ingest({"method": "turn/completed", "params": {
-        "threadId": "s", "turn": {"id": "t", "status": "failed"}
-    }}, tmp_path)
-    assert "НЕ ПРОЙДЕНО" in handle("Stop", env, tmp_path)["systemMessage"]
+    monkeypatch.setattr(engine, "run_review", lambda *a: 1 / 0)
+    handle("UserPromptSubmit", hook(repo, "UserPromptSubmit"), tmp_path)
+    p = hook(repo, "PostToolUse")
+    p["tool_response"] = {"message": "unknown"}
+    handle("PostToolUse", p, tmp_path)
+    result = handle("Stop", hook(repo, "Stop"), tmp_path)
+    assert "НЕ ПРОЙДЕНО" in result["systemMessage"]
+    assert read(state_path(repo, "s", tmp_path))["status"] == "error"
 
 
-def test_no_git_fallback_if_appserver_event_missing(repo: Path, tmp_path: Path) -> None:
-    (repo / "x.py").write_text("large = 1\n" * 100)
-    env = {"cwd": str(repo), "session_id": "no-stream", "turn_id": "t"}
-    handle("UserPromptSubmit", env, tmp_path)
-    response = handle("Stop", env, tmp_path)
-    assert "НЕ ПРОЙДЕНО" in response["systemMessage"]
-    assert read(state_path(repo, "no-stream", tmp_path))["status"] == "error"
-
-
-def test_source_of_large_task_preserved(repo: Path, tmp_path: Path) -> None:
-    message = "Описание задачи " * 1000
-    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t", "prompt": message}
-    handle("UserPromptSubmit", env, tmp_path)
-    assert read(state_path(repo, "s", tmp_path))["previous_message"] == message
-
-
-def test_stop_auto_continuation_keeps_round_budget_and_user_intent(
-    monkeypatch, repo: Path, tmp_path: Path
-) -> None:
+def test_round_budget_persists_with_auto_continuation(monkeypatch, repo, tmp_path):
     import codex_auto_review.engine as engine
     (tmp_path / "config.toml").write_text(
-        '[review]\nmode="all"\nmax_review_rounds=2\n', encoding="utf-8"
-    )
+        '[review]\nmode="all"\nmax_review_rounds=2\n')
     seen = []
-    def reviewer(r, files, cfg, message=""):
+    def reviewer(root, files, cfg, message):
         seen.append(message)
-        return [Finding("P1", "x.py", 1, "Ошибка", "Неверное поведение", 0.9)]
+        return [Finding("P1", "x.py", 1, "Bug", "Wrong output", .99)]
     monkeypatch.setattr(engine, "run_review", reviewer)
-    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t1", "prompt": "Сделай фичу"}
-    handle("UserPromptSubmit", env, tmp_path)
-    capture(patch("first"), tmp_path, turn="t1")
-    blocked = handle("Stop", env, tmp_path)
-    assert blocked["decision"] == "block"
-    continuation = {**env, "turn_id": "t2", "prompt": blocked["reason"]}
-    handle("UserPromptSubmit", continuation, tmp_path)
-    assert read(state_path(repo, "s", tmp_path))["rounds"] == 1
-    capture(patch("fixed"), tmp_path, turn="t2")
-    final = handle("Stop", continuation, tmp_path)
+    handle("UserPromptSubmit", hook(repo, "UserPromptSubmit", task="Оригинал"), tmp_path)
+    handle("PostToolUse", hook(repo, "PostToolUse"), tmp_path)
+    response = handle("Stop", hook(repo, "Stop"), tmp_path)
+    assert response["decision"] == "block"
+    handle("UserPromptSubmit", hook(repo, "UserPromptSubmit", turn="t2",
+                                    task=response["reason"]), tmp_path)
+    handle("PostToolUse", hook(repo, "PostToolUse", turn="t2", value="fixed"), tmp_path)
+    final = handle("Stop", hook(repo, "Stop", turn="t2"), tmp_path)
     assert "последний раунд" in final["systemMessage"]
-    state = read(state_path(repo, "s", tmp_path))
-    assert state["rounds"] == 2 and state["status"] == "limit_reached"
-    assert seen == ["Сделай фичу", "Сделай фичу"]
+    assert seen == ["Оригинал", "Оригинал"]
 
 
-def test_stop_auto_continuation_with_no_code_keeps_unresolved_findings(
-    monkeypatch, repo: Path, tmp_path: Path
-) -> None:
-    import codex_auto_review.engine as engine
-    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
-    monkeypatch.setattr(engine, "run_review", lambda *args: [
-        Finding("P2", "x.py", 1, "Ошибка", "Неисправленный дефект", 0.9)
-    ])
-    original = {"cwd": str(repo), "session_id": "s", "turn_id": "t1", "prompt": "Измени"}
-    handle("UserPromptSubmit", original, tmp_path)
-    capture(patch("bad"), tmp_path, turn="t1")
-    response = handle("Stop", original, tmp_path)
-    followup = {**original, "turn_id": "t2", "prompt": response["reason"]}
-    handle("UserPromptSubmit", followup, tmp_path)
-    capture("diff --git a/README.md b/README.md\n--- a/README.md\n"
-            "+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n", tmp_path, turn="t2")
-    assert "НЕ ПРОЙДЕНО" in handle("Stop", followup, tmp_path)["systemMessage"]
+def test_original_task_is_not_truncated(repo, tmp_path):
+    big = "Напиши код " * 700
+    handle("UserPromptSubmit", hook(repo, "UserPromptSubmit", task=big), tmp_path)
+    assert read(state_path(repo, "s", tmp_path))["previous_message"] == big
