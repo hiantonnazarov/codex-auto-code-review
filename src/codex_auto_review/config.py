@@ -26,6 +26,8 @@ class Config:
     critical_globs: tuple[str, ...] = (
         "**/auth/**", "**/security/**", "**/migrations/**", "**/schema/**",
         "**/api/**", "**/concurrency/**", "**/payment/**",
+        "**/auth.py", "**/security.py", "**/schema.py", "**/api.py",
+        "**/pyproject.toml", "**/package.json", "**/.github/workflows/**",
     )
     include_globs: tuple[str, ...] = ("*",)
     exclude_globs: tuple[str, ...] = (
