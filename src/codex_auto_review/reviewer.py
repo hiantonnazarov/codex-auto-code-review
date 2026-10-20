@@ -70,6 +70,8 @@ class Finding:
             raise ReviewerError("Некорректный номер строки или показатель уверенности")
         if not isinstance(title, str) or not isinstance(explanation, str) or not title.strip() or not explanation.strip():
             raise ReviewerError("В замечании отсутствует объяснение")
+        if len(title) > 200 or len(explanation) > 5000 or len(f) > 4096:
+            raise ReviewerError("Замечание превышает допустимую длину")
         return Finding(p, f, line, title.strip(), explanation.strip(), float(confidence))
 
 
@@ -169,7 +171,8 @@ def _validate_result(payload: object, allowed: set[str],
                      limits: dict[str, int]) -> list[Finding]:
     if (not isinstance(payload, dict) or set(payload) != {"summary", "findings"}
             or not isinstance(payload["summary"], str)
-            or not isinstance(payload["findings"], list)):
+            or not isinstance(payload["findings"], list)
+            or len(payload["findings"]) > 200 or len(payload["summary"]) > 4000):
         raise ReviewerError("JSON-ответ Codex reviewer не соответствует схеме")
     findings = []
     for item in payload["findings"]:
