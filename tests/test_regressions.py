@@ -133,3 +133,40 @@ def test_os_lock_rejects_concurrent_owner(tmp_path: Path) -> None:
     assert len(failures) == 1 and isinstance(failures[0], RuntimeError)
     with locked(path, max_wait_seconds=0.02):
         pass  # ОС освободила блокировку
+
+
+def test_fail_closed_error_stops_automatic_retry_loop(monkeypatch, repo: Path, tmp_path: Path) -> None:
+    import codex_auto_review.engine as engine
+    (tmp_path / "config.toml").write_text(
+        '[review]\nmode="all"\nfail_open=false\n', encoding="utf-8"
+    )
+    calls = []
+    def broken(*args, **kwargs):
+        calls.append(1)
+        raise ReviewerError("unavailable")
+    monkeypatch.setattr(engine, "run_review", broken)
+    payload = {"cwd": str(repo), "session_id": "closed", "turn_id": "first", "prompt": "изменить"}
+    handle("UserPromptSubmit", payload, tmp_path)
+    original = read(state_path(repo, "closed", tmp_path))["baseline"]
+    (repo / "x.py").write_text("x = 5\n")
+    first = handle("Stop", payload, tmp_path)
+    assert first["decision"] == "block"
+    continuation = {**payload, "turn_id": "cont", "prompt": first["reason"]}
+    handle("UserPromptSubmit", continuation, tmp_path)
+    second = handle("Stop", continuation, tmp_path)
+    assert second["continue"] is False
+    assert "НЕ ПРОЙДЕНО" in second["systemMessage"]
+    assert len(calls) == 1
+    assert read(state_path(repo, "closed", tmp_path))["baseline"] == original
+
+
+def test_doctor_tracks_observed_stop(monkeypatch, tmp_path: Path) -> None:
+    import codex_auto_review.cli as cli
+    monkeypatch.setattr(cli, "HOME_DIR", tmp_path)
+    (tmp_path / "hook-events.json").write_text(
+        json.dumps({"UserPromptSubmit": "2026-10-20", "Stop": "2026-10-20"}),
+        encoding="utf-8"
+    )
+    info = cli._doctor()["hook_events_observed"]
+    assert info["stop_delivery_confirmed"] is True
+    assert info["last_Stop"] == "2026-10-20"
