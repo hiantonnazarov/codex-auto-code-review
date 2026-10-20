@@ -100,3 +100,50 @@ def test_source_of_large_task_preserved(repo: Path, tmp_path: Path) -> None:
     env = {"cwd": str(repo), "session_id": "s", "turn_id": "t", "prompt": message}
     handle("UserPromptSubmit", env, tmp_path)
     assert read(state_path(repo, "s", tmp_path))["previous_message"] == message
+
+
+def test_stop_auto_continuation_keeps_round_budget_and_user_intent(
+    monkeypatch, repo: Path, tmp_path: Path
+) -> None:
+    import codex_auto_review.engine as engine
+    (tmp_path / "config.toml").write_text(
+        '[review]\nmode="all"\nmax_review_rounds=2\n', encoding="utf-8"
+    )
+    seen = []
+    def reviewer(r, files, cfg, message=""):
+        seen.append(message)
+        return [Finding("P1", "x.py", 1, "Ошибка", "Неверное поведение", 0.9)]
+    monkeypatch.setattr(engine, "run_review", reviewer)
+    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t1", "prompt": "Сделай фичу"}
+    handle("UserPromptSubmit", env, tmp_path)
+    capture(patch("first"), tmp_path, turn="t1")
+    blocked = handle("Stop", env, tmp_path)
+    assert blocked["decision"] == "block"
+    continuation = {**env, "turn_id": "t2", "prompt": blocked["reason"]}
+    handle("UserPromptSubmit", continuation, tmp_path)
+    assert read(state_path(repo, "s", tmp_path))["rounds"] == 1
+    capture(patch("fixed"), tmp_path, turn="t2")
+    final = handle("Stop", continuation, tmp_path)
+    assert "последний раунд" in final["systemMessage"]
+    state = read(state_path(repo, "s", tmp_path))
+    assert state["rounds"] == 2 and state["status"] == "limit_reached"
+    assert seen == ["Сделай фичу", "Сделай фичу"]
+
+
+def test_stop_auto_continuation_with_no_code_keeps_unresolved_findings(
+    monkeypatch, repo: Path, tmp_path: Path
+) -> None:
+    import codex_auto_review.engine as engine
+    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
+    monkeypatch.setattr(engine, "run_review", lambda *args: [
+        Finding("P2", "x.py", 1, "Ошибка", "Неисправленный дефект", 0.9)
+    ])
+    original = {"cwd": str(repo), "session_id": "s", "turn_id": "t1", "prompt": "Измени"}
+    handle("UserPromptSubmit", original, tmp_path)
+    capture(patch("bad"), tmp_path, turn="t1")
+    response = handle("Stop", original, tmp_path)
+    followup = {**original, "turn_id": "t2", "prompt": response["reason"]}
+    handle("UserPromptSubmit", followup, tmp_path)
+    capture("diff --git a/README.md b/README.md\n--- a/README.md\n"
+            "+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n", tmp_path, turn="t2")
+    assert "НЕ ПРОЙДЕНО" in handle("Stop", followup, tmp_path)["systemMessage"]
