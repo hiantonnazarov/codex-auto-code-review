@@ -54,7 +54,7 @@ def _apply(config: Config, changes: dict[str, Any], origin: Path) -> Config:
     for name, value in changes.items():
         if name in ("critical_globs", "include_globs"):
             warnings.warn(
-                f"{name} больше не используется: App Server review поддерживает только exclude_globs",
+                f"{name} больше не используется: PostToolUse review поддерживает только exclude_globs",
                 DeprecationWarning, stacklevel=2,
             )
             continue
