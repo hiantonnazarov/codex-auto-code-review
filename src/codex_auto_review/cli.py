@@ -42,9 +42,8 @@ def _command_owned(hook: object) -> bool:
 
 
 def _owned(entry: dict) -> bool:
-    return isinstance(entry, dict) and any(
-        _command_owned(h) for h in entry.get("hooks", []) if isinstance(entry.get("hooks"), list)
-    )
+    return (isinstance(entry, dict) and isinstance(entry.get("hooks"), list)
+            and any(_command_owned(h) for h in entry["hooks"]))
 
 
 def _without_owned(entries: list[dict]) -> list[dict]:
