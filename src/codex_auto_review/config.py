@@ -1,4 +1,4 @@
-"""Validated configuration, global defaults and local overrides."""
+"""Проверка конфигурации, значения по умолчанию и переопределения настроек."""
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
@@ -7,7 +7,8 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-CONFIG_NAME = ".codex-auto-review.toml"
+CONFIG_NAME = "config.toml"
+LEGACY_CONFIG_NAME = ".codex-auto-review.toml"
 HOME_DIR = Path.home() / ".codex-auto-code-review"
 CODE_SUFFIXES = (
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".go",
@@ -19,7 +20,7 @@ CODE_SUFFIXES = (
 @dataclass(frozen=True)
 class Config:
     enabled: bool = True
-    mode: str = "significant"  # significant | all
+    mode: str = "significant"  # significant | all (только существенные изменения или любые)
     min_changed_lines: int = 30
     min_changed_files: int = 2
     critical_globs: tuple[str, ...] = (
@@ -31,7 +32,7 @@ class Config:
         "**/node_modules/**", "**/vendor/**", "**/dist/**", "**/build/**",
         "**/.venv/**", "**/coverage/**", "**/*.min.js", "**/*.lock",
     )
-    reviewer_model: str = ""  # empty: Codex configured default
+    reviewer_model: str = ""  # пустая строка — модель из настроек Codex
     reasoning_effort: str = "high"
     codex_command: str = "codex"
     confidence_threshold: float = 0.65
@@ -41,12 +42,12 @@ class Config:
     max_chunks: int = 6
     timeout_seconds_per_chunk: int = 100
     fail_open: bool = True
-    report_dir: str = ""  # empty: app state folder, not the source tree
+    report_dir: str = ""  # пустая строка — каталог состояния приложения вне исходного кода
 
 
 def _tuple_strings(value: Any, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(i, str) and i for i in value):
-        raise ValueError(f"{field}: expected a non-empty list of strings (or an empty list)")
+        raise ValueError(f"{field}: ожидался список строк (допускается пустой список)")
     return tuple(value)
 
 
@@ -55,40 +56,40 @@ def _apply(config: Config, changes: dict[str, Any], origin: Path) -> Config:
     result: dict[str, Any] = {}
     for name, value in changes.items():
         if name not in known:
-            raise ValueError(f"Unknown setting {name!r} in {origin}")
+            raise ValueError(f"Неизвестная настройка {name!r} в {origin}")
         current = getattr(config, name)
         if isinstance(current, tuple):
             value = _tuple_strings(value, name)
         elif isinstance(current, bool):
             if type(value) is not bool:
-                raise ValueError(f"{name}: expected boolean")
+                raise ValueError(f"{name}: ожидается логическое значение true/false")
         elif isinstance(current, int):
             if type(value) is not int:
-                raise ValueError(f"{name}: expected integer")
+                raise ValueError(f"{name}: ожидается целое число")
         elif isinstance(current, float):
             if type(value) not in (int, float):
-                raise ValueError(f"{name}: expected number")
+                raise ValueError(f"{name}: ожидается число")
             value = float(value)
         elif not isinstance(value, str):
-            raise ValueError(f"{name}: expected string")
+            raise ValueError(f"{name}: ожидается строка")
         result[name] = value
     config = replace(config, **result)
     if config.mode not in ("all", "significant"):
-        raise ValueError("mode must be all or significant")
+        raise ValueError("mode: допустимые значения all или significant")
     if config.reasoning_effort not in ("low", "medium", "high", "xhigh"):
-        raise ValueError("reasoning_effort must be low/medium/high/xhigh")
+        raise ValueError("reasoning_effort: допустимые значения low/medium/high/xhigh")
     if not 0 <= config.confidence_threshold <= 1:
-        raise ValueError("confidence_threshold must be in [0, 1]")
+        raise ValueError("confidence_threshold должен находиться в диапазоне от 0 до 1")
     if any(getattr(config, k) < minimum for k, minimum in (
         ("min_changed_lines", 0), ("min_changed_files", 1),
         ("max_review_rounds", 1), ("max_diff_chars_per_chunk", 1000),
         ("max_chunks", 1), ("timeout_seconds_per_chunk", 1),
     )):
-        raise ValueError("invalid non-positive or too-small numeric setting")
+        raise ValueError("Недопустимое отрицательное или слишком маленькое числовое значение настройки")
     if not config.codex_command.strip():
-        raise ValueError("codex_command cannot be blank")
+        raise ValueError("codex_command не должен быть пустым")
     if any(x not in ("P0", "P1", "P2", "P3") for x in config.blocking_priorities):
-        raise ValueError("blocking_priorities must be P0..P3")
+        raise ValueError("blocking_priorities: допустимы только P0, P1, P2, P3")
     return config
 
 
@@ -96,13 +97,18 @@ def load_config(repo: Path | None = None, home: Path | None = None) -> Config:
     config = Config()
     locations = [(home or HOME_DIR) / "config.toml"]
     if repo is not None:
-        locations.append(repo / CONFIG_NAME)
+        # Старый локальный файл загружается первым; корневой config.toml имеет приоритет.
+        # config.toml может принадлежать другому инструменту: без [review] он игнорируется.
+        locations.extend([repo / LEGACY_CONFIG_NAME, repo / CONFIG_NAME])
     for path in locations:
-        if path.is_file():
-            payload = tomllib.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(payload.get("review", {}), dict):
-                raise ValueError(f"Expected [review] table in {path}")
-            config = _apply(config, payload.get("review", {}), path)
+        if not path.is_file():
+            continue
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        if path.name == CONFIG_NAME and repo is not None and path == repo / CONFIG_NAME and "review" not in payload:
+            continue
+        if not isinstance(payload.get("review", {}), dict):
+            raise ValueError(f"Ожидалась таблица [review] в {path}")
+        config = _apply(config, payload.get("review", {}), path)
     return config
 
 
