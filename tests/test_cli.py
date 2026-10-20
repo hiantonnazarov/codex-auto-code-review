@@ -11,7 +11,7 @@ def test_install_preserves_other_hooks_and_uninstall(tmp_path: Path) -> None:
     path.write_text(json.dumps(other))
     install(path)
     install(path)
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     assert len(payload["hooks"]["Stop"]) == 2
     assert len(payload["hooks"]["UserPromptSubmit"]) == 1
     assert any(_owned(x) for x in payload["hooks"]["Stop"])
@@ -22,8 +22,8 @@ def test_install_preserves_other_hooks_and_uninstall(tmp_path: Path) -> None:
     assert all("statusMessage" not in h for group in payload["hooks"]["UserPromptSubmit"]
                for h in group["hooks"])
     uninstall(path)
-    assert json.loads(path.read_text())["hooks"]["Stop"] == other["hooks"]["Stop"]
-    assert json.loads(path.read_text())["hooks"]["SessionStart"] == other["hooks"]["SessionStart"]
+    assert json.loads(path.read_text(encoding="utf-8"))["hooks"]["Stop"] == other["hooks"]["Stop"]
+    assert json.loads(path.read_text(encoding="utf-8"))["hooks"]["SessionStart"] == other["hooks"]["SessionStart"]
 
 
 def test_config_overrides(repo: Path, tmp_path: Path) -> None:
@@ -40,7 +40,7 @@ def test_uninstall_preserves_mixed_group(tmp_path: Path) -> None:
         {"type": "command", "command": "other-hook"},
     ]}]}}))
     uninstall(path)
-    entries = json.loads(path.read_text())["hooks"]["Stop"]
+    entries = json.loads(path.read_text(encoding="utf-8"))["hooks"]["Stop"]
     assert entries == [{"hooks": [{"type": "command", "command": "other-hook"}]}]
 
 
