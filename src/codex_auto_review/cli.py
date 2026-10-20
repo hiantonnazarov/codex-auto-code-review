@@ -70,8 +70,14 @@ def install(path: Path) -> None:
         if not isinstance(entries, list):
             raise ValueError(f"hooks.{event}: ожидается массив")
         entries[:] = _without_owned(entries)
-        entries.append({"hooks": [{"type": "command", "command": command_for(event),
-                                     "timeout": 900 if event == "Stop" else 20}]})
+        handler = {"type": "command", "command": command_for(event),
+                   "timeout": 900 if event == "Stop" else 20}
+        if event == "Stop":
+            # Статический статус во время работы hook: Codex не поддерживает
+            # динамические сообщения о прогрессе из stdout запущенного hook.
+            # Формулировка верна даже когда код не изменился и reviewer не вызван.
+            handler["statusMessage"] = "Auto Code Review: проверяю, требуется ли ревью кода"
+        entries.append({"hooks": [handler]})
     _atomic_json(path, payload)
 
 
