@@ -164,12 +164,12 @@ def stop(repo: Path, session: str, home: Path | None = None,
     try:
         with locked(path):
             state = read(path)
-            if state.get("turn_id") != turn_id or "previous_message" not in state:
-                raise CaptureError(
-                    "Не получен UserPromptSubmit текущего хода: исходное задание "
-                    "неизвестно. Запускать ревью без требований запрещено."
-                )
             try:
+                if state.get("turn_id") != turn_id or "previous_message" not in state:
+                    raise CaptureError(
+                        "Не получен UserPromptSubmit текущего хода: исходное задание "
+                        "неизвестно. Запускать ревью без требований запрещено."
+                    )
                 return _stop_locked(repo, session, turn_id, path, state, cfg, home)
             except (CaptureError, ReviewerError, OSError, ValueError, RuntimeError) as exc:
                 return _error(repo, session, turn_id, cfg, home, path, state, exc)
