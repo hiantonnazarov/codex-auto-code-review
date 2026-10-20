@@ -1,109 +1,108 @@
-from pathlib import Path
+"""Проверки хода без Git diff и без вмешательства в чужие изменения."""
 import json
+from pathlib import Path
+import subprocess
 
+from codex_auto_review.appserver import ingest
 from codex_auto_review.config import Config
-from codex_auto_review.engine import handle, significant, manual_review
-from codex_auto_review.git import Change
-from codex_auto_review.store import read, state_path
+from codex_auto_review.engine import handle, manual_review, significant
 from codex_auto_review.reviewer import Finding, ReviewerError
+from codex_auto_review.store import read, state_path
 
 
-def test_significance() -> None:
+def event(diff: str, session: str = "s", turn: str = "t") -> dict:
+    return {"method": "turn/diff/updated", "params": {
+        "threadId": session, "turnId": turn, "diff": diff
+    }}
+
+
+def sample(file: str = "x.py", value: int = 2) -> str:
+    return (f"diff --git a/{file} b/{file}\n"
+            f"--- a/{file}\n+++ b/{file}\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            f"+new_{value}\n")
+
+
+def test_significant_with_no_critical_paths() -> None:
+    from codex_auto_review.appserver import Change
     cfg = Config()
-    assert not significant([Change("a.py", 10, 2)], cfg)
-    assert significant([Change("a.py", 31, 0)], cfg)
-    assert significant([Change("a.py", 1, 0), Change("b.py", 1, 0)], cfg)
-    assert significant([Change("src/auth/login.py", 1, 0)], cfg)
-    assert significant([Change("foo.py", 1, 0)], Config(mode="all"))
+    assert not significant([Change("auth/login.py", 1, 1, "test")], cfg)
+    assert significant([Change("x.py", 25, 5, "test")], cfg)
+    assert significant([Change("x.py", 1, 0, "test"), Change("y.py", 1, 0, "test")], cfg)
+    assert significant([Change("x.py", 1, 0, "test")], Config(mode="all"))
 
 
-def test_hook_roundtrip_fix_and_review(monkeypatch, repo: Path, tmp_path: Path) -> None:
-    import codex_auto_review.engine as engine
-    home = tmp_path / "settings"
-    (home / "config.toml").parent.mkdir(exist_ok=True)
-    (home / "config.toml").write_text('[review]\nmode="all"\nmax_review_rounds=3\n')
-    calls = []
-    def fake_reviewer(r, baseline, current, files, config, previous_message=""):
-        calls.append(current)
-        assert "x.py" in [c.path for c in files]
-        if len(calls) == 1:
-            return [Finding("P1", "x.py", 2, "Неверный результат функции", "Функция возвращает неверное значение", .9)]
-        return []
-    monkeypatch.setattr(engine, "run_review", fake_reviewer)
-    env = {"cwd": str(repo), "session_id": "session-1", "prompt": "Измени функцию"}
-    assert handle("UserPromptSubmit", env, home) == {}
-    (repo / "x.py").write_text("def f():\n    return 2\n")
-    blocked = handle("Stop", env, home)
-    assert blocked["decision"] == "block"
-    # Одно и то же дерево не проверяется повторно и не блокируется бесконечно.
-    unchanged = handle("Stop", env, home)
-    assert "Ревью НЕ ПРОЙДЕНО" in unchanged["systemMessage"]
-    assert len(calls) == 1
-    (repo / "x.py").write_text("def f():\n    return 3\n")
-    passed = handle("Stop", env, home)
-    assert "ПРОЙДЕНО" in passed["systemMessage"]
-    assert len(calls) == 2
-    assert handle("Stop", env, home) == {}
-    state = read(state_path(repo, "session-1", home))
-    assert state["rounds"] == 2 and state["status"] == "passed"
-    assert Path(state["last_report"]).is_file()
-    assert json.loads(Path(state["last_report"]).read_text())["reviewed_tree"] == calls[-1]
-
-
-def test_no_review_for_docs_and_no_edits(monkeypatch, repo, tmp_path) -> None:
-    import codex_auto_review.engine as engine
-    monkeypatch.setattr(engine, "run_review", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should skip")))
-    payload = {"cwd": str(repo), "session_id": "s"}
-    assert handle("UserPromptSubmit", payload, tmp_path) == {}
-    assert handle("Stop", payload, tmp_path) == {}
-    (repo / "README.md").write_text("docs\n")
-    assert handle("Stop", payload, tmp_path) == {}
-
-
-def test_max_rounds_finishes_with_warning(monkeypatch, repo, tmp_path) -> None:
-    import codex_auto_review.engine as engine
-    (tmp_path / "config.toml").write_text('[review]\nmode="all"\nmax_review_rounds=1\n')
-    monkeypatch.setattr(engine, "run_review", lambda *a, **kw: [Finding("P2", "x.py", 1, "Ошибка", "Некорректное поведение", .8)])
-    env = {"cwd": str(repo), "session_id": "s"}
-    handle("UserPromptSubmit", env, tmp_path)
-    (repo / "x.py").write_text("a=5\n")
-    response = handle("Stop", env, tmp_path)
-    assert "последний разрешённый раунд" in response["systemMessage"]
-    assert "Ошибка" in response["systemMessage"]
-
-
-def test_failure_visible_not_passed(monkeypatch, repo, tmp_path) -> None:
+def test_roundtrip_blocks_then_passes_without_git_diff(monkeypatch, repo: Path,
+                                                        tmp_path: Path) -> None:
     import codex_auto_review.engine as engine
     (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
-    monkeypatch.setattr(engine, "run_review", lambda *a, **kw: (_ for _ in ()).throw(ReviewerError("rate limited")))
-    env = {"cwd": str(repo), "session_id": "s"}
+    calls = []
+    def reviewer(r, files, cfg, message=""):
+        calls.append([f.path for f in files])
+        if len(calls) == 1:
+            return [Finding("P1", "x.py", 2, "Ошибка", "Возвращает неверное значение", .9)]
+        return []
+    monkeypatch.setattr(engine, "run_review", reviewer)
+    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t", "prompt": "Измени функцию"}
+    assert handle("UserPromptSubmit", env, tmp_path) == {}
+    ingest(event(sample()), tmp_path)
+    blocked = handle("Stop", env, tmp_path)
+    assert blocked["decision"] == "block"
+    assert handle("Stop", env, tmp_path)["systemMessage"].startswith("Ревью НЕ ПРОЙДЕНО")
+    ingest(event(sample(value=3)), tmp_path)
+    assert "ПРОЙДЕНО" in handle("Stop", env, tmp_path)["systemMessage"]
+    assert handle("Stop", env, tmp_path) == {}
+    assert calls == [["x.py"], ["x.py"]]
+    state = read(state_path(repo, "s", tmp_path))
+    assert state["rounds"] == 2 and state["status"] == "passed"
+    assert json.loads(Path(state["last_report"]).read_text())["source"] == "codex-app-server"
+
+
+def test_docs_and_ignored_diff_never_invoke_review(monkeypatch, repo, tmp_path) -> None:
+    import codex_auto_review.engine as engine
+    monkeypatch.setattr(engine, "run_review", lambda *a: 1 / 0)
+    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t"}
     handle("UserPromptSubmit", env, tmp_path)
-    (repo / "x.py").write_text("a=4\n")
-    response = handle("Stop", env, tmp_path)
-    assert "не пройдена" in response["systemMessage"]
+    ingest(event(sample("README.md") + sample("node_modules/dep/x.py")), tmp_path)
+    assert handle("Stop", env, tmp_path) == {}
+
+
+def test_committed_git_changes_are_not_scanned(monkeypatch, repo: Path,
+                                               tmp_path: Path) -> None:
+    """Старый committed и новый staged код отсутствуют в App Server diff."""
+    import codex_auto_review.engine as engine
+    (repo / "foreign.py").write_text("other = True\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "external"], check=True,
+                   capture_output=True)
+    (repo / "staged.py").write_text("staged = True\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
+    captured = []
+    monkeypatch.setattr(engine, "run_review",
+                        lambda r, files, cfg, message="": captured.extend(f.path for f in files) or [])
+    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t"}
+    handle("UserPromptSubmit", env, tmp_path)
+    ingest(event(sample("x.py")), tmp_path)
+    assert "ПРОЙДЕНО" in handle("Stop", env, tmp_path)["systemMessage"]
+    assert captured == ["x.py"]
+
+
+def test_missing_event_is_error_never_passed(repo: Path, tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
+    env = {"cwd": str(repo), "session_id": "s", "turn_id": "t"}
+    handle("UserPromptSubmit", env, tmp_path)
+    result = handle("Stop", env, tmp_path)
+    assert "НЕ ПРОЙДЕНО" in result["systemMessage"]
     assert read(state_path(repo, "s", tmp_path))["status"] == "error"
 
 
-def test_manual_review_includes_untracked(monkeypatch, repo, tmp_path) -> None:
+def test_manual_review_only_uses_appserver_saved_diff(monkeypatch, repo: Path,
+                                                        tmp_path: Path) -> None:
     import codex_auto_review.engine as engine
-    captured = []
-    monkeypatch.setattr(engine, "run_review", lambda *args: captured.append(args[3]) or [])
-    (repo / "y.py").write_text("y=1\n")
-    result = manual_review(repo, tmp_path)
+    monkeypatch.setattr(engine, "run_review", lambda *a: [])
+    ingest(event(sample("x.py"), "session", "turn"), tmp_path)
+    result = manual_review(repo, "session", "turn", tmp_path)
     assert result["status"] == "passed"
-    assert "y.py" in [x.path for x in captured[0]]
-
-
-def test_changed_during_review_never_marked_pass(monkeypatch, repo, tmp_path):
-    import codex_auto_review.engine as engine
-    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
-    def mutate(*args, **kwargs):
-        (repo / "x.py").write_text("late change\n")
-        return []
-    monkeypatch.setattr(engine, "run_review", mutate)
-    env = {"cwd": str(repo), "session_id": "stale"}
-    handle("UserPromptSubmit", env, tmp_path)
-    (repo / "x.py").write_text("initial edit\n")
-    result = handle("Stop", env, tmp_path)
-    assert result["decision"] == "block" and "Файлы изменились" in result["reason"]
-    assert read(state_path(repo, "stale", tmp_path))["status"] == "stale_review"
+    assert Path(result["report"]).exists()
