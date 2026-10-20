@@ -49,9 +49,18 @@ def test_roundtrip_blocks_then_passes_without_git_diff(monkeypatch, repo: Path,
     ingest(event(sample()), tmp_path)
     blocked = handle("Stop", env, tmp_path)
     assert blocked["decision"] == "block"
+    assert "НАЙДЕНЫ" not in blocked["reason"]  # сообщение использует обычный текст без спецсимволов
+    assert "НАЙДЕНЫ ОШИБКИ" in blocked["reason"]
+    assert "файлов: 1" in blocked["reason"]
+    assert "замечаний: 1 (P1: 1)" in blocked["reason"]
+    assert "раунд 1/3" in blocked["reason"]
     assert handle("Stop", env, tmp_path)["systemMessage"].startswith("Ревью НЕ ПРОЙДЕНО")
     ingest(event(sample(value=3)), tmp_path)
-    assert "ПРОЙДЕНО" in handle("Stop", env, tmp_path)["systemMessage"]
+    summary = handle("Stop", env, tmp_path)["systemMessage"]
+    assert "ПРОЙДЕНО" in summary
+    assert "файлов: 1" in summary
+    assert "замечаний: 0 (нет)" in summary
+    assert "раунд 2/3" in summary
     assert handle("Stop", env, tmp_path) == {}
     assert calls == [["x.py"], ["x.py"]]
     state = read(state_path(repo, "s", tmp_path))
