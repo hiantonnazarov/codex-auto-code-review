@@ -5,6 +5,7 @@ from dataclasses import dataclass, fields, replace
 from fnmatch import fnmatch
 from pathlib import Path
 import tomllib
+import warnings
 from typing import Any
 
 CONFIG_NAME = "config.toml"
@@ -51,6 +52,12 @@ def _apply(config: Config, changes: dict[str, Any], origin: Path) -> Config:
     known = {f.name: f for f in fields(Config)}
     result: dict[str, Any] = {}
     for name, value in changes.items():
+        if name in ("critical_globs", "include_globs"):
+            warnings.warn(
+                f"{name} больше не используется: App Server review поддерживает только exclude_globs",
+                DeprecationWarning, stacklevel=2,
+            )
+            continue
         if name not in known:
             raise ValueError(f"Неизвестная настройка {name!r} в {origin}")
         current = getattr(config, name)
