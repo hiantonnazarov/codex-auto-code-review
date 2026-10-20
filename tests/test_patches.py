@@ -110,6 +110,30 @@ def test_only_code_and_ignore_masks(repo, tmp_path):
     ]
 
 
+def test_structural_delete_and_move_are_retained(repo, tmp_path):
+    deletion = "*** Begin Patch\n*** Delete File: src/legacy.py\n*** End Patch\n"
+    record_patch(payload(deletion), repo, tmp_path)
+    deleted = code_changes(repo, "A", "t1", Config(), tmp_path)
+    assert len(deleted) == 1
+    assert deleted[0].path == "src/legacy.py"
+    assert deleted[0].structural
+    from codex_auto_review.engine import significant
+    assert significant(deleted, Config())
+
+    move = ("*** Begin Patch\n*** Update File: src/old.py\n"
+            "*** Move to: src/new.py\n@@\n-old\n+new\n*** End Patch\n")
+    record_patch(payload(move, call="c2"), repo, tmp_path)
+    changes = code_changes(repo, "A", "t1", Config(), tmp_path)
+    assert [change.path for change in changes] == ["src/legacy.py", "src/new.py"]
+    assert all(change.structural for change in changes)
+
+
+def test_unknown_apply_patch_result_fails_closed_without_false_success(repo, tmp_path):
+    record_patch(payload(patch(), response="Unexpected output"), repo, tmp_path)
+    with pytest.raises(CaptureError, match="Неподтверждённый"):
+        code_changes(repo, "A", "t1", Config(), tmp_path)
+
+
 def test_no_apply_patch_and_empty_turn(repo, tmp_path):
     p = payload(patch())
     p["tool_name"] = "Bash"
