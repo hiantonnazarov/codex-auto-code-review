@@ -1,6 +1,6 @@
-"""Non-destructive Git snapshots using an alternate index and tree objects.
+"""Безопасные снимки Git с временным индексом и объектами дерева.
 
-Never stage real index entries or alter user files; include untracked nonignored files.
+Реальный индекс и пользовательские файлы не меняются. Новые неигнорируемые файлы включаются.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class GitError(RuntimeError):
 def run(repo: Path, *args: str, env: dict[str, str] | None = None) -> bytes:
     p = subprocess.run(["git", "-C", str(repo), *args], env=env, capture_output=True, check=False)
     if p.returncode:
-        raise GitError(f"git {' '.join(args[:3])} failed: {p.stderr.decode(errors='replace').strip()}")
+        raise GitError(f"Сбой git {' '.join(args[:3])}: {p.stderr.decode(errors='replace').strip()}")
     return p.stdout
 
 
@@ -34,7 +34,7 @@ def head_tree(repo: Path) -> str:
 
 
 def snapshot(repo: Path) -> str:
-    """Create a tree of current files via temporary index; does not touch .git/index."""
+    """Создать дерево через временный индекс, не затрагивая .git/index."""
     fd, filename = tempfile.mkstemp(prefix="codex-auto-index-")
     os.close(fd)
     try:
@@ -66,19 +66,19 @@ def changes(repo: Path, baseline: str, current: str) -> list[Change]:
     if baseline == current:
         return []
     raw = run(repo, "diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", baseline, current)
-    # Git --numstat -z: A\tD\tpath\0; renames use A\tD\t\0old\0new\0
+    # Формат Git --numstat -z: A\tD\tpath\0; при переименовании A\tD\t\0old\0new\0
     tokens = raw.split(b"\0")
     result = []
     i = 0
     while i < len(tokens) and tokens[i]:
         parts = tokens[i].split(b"\t", 2)
         if len(parts) != 3:
-            raise GitError("Unexpected git numstat format")
+            raise GitError("Неожиданный формат git numstat")
         a, d, path = parts
         i += 1
         if not path:
             if i + 1 >= len(tokens):
-                raise GitError("Malformed rename numstat")
+                raise GitError("Некорректная запись о переименовании в numstat")
             path = tokens[i + 1]
             i += 2
         binary = a == b"-" or d == b"-"
