@@ -180,6 +180,10 @@ def _stop_locked(repo: Path, session: str, path: Path, state: dict,
         return {}
     cache_key = current + ":" + _policy_key(cfg)
     prior = state.get("reviewed", {}).get(cache_key)
+    if prior in ("passed", "blocked"):
+        state.update(status=prior, last_report=state.get("reports_by_tree", {}).get(
+            cache_key, state.get("last_report")), updated_at=_timestamp())
+        write(path, state)
     if prior == "passed":
         return {}
     if prior == "blocked":
@@ -201,7 +205,9 @@ def _stop_locked(repo: Path, session: str, path: Path, state: dict,
                             f"Отчёт: {state.get('last_report', '')}")
     findings = run_review(repo, baseline, current, changed, cfg, state.get("previous_message", ""))
     if snapshot(repo) != current:
-        state.update(status="stale_review", updated_at=_timestamp())
+        report = _save_report(repo, session, cfg, home, baseline, current, [],
+                              "stale_review", state.get("rounds", 0))
+        state.update(status="stale_review", last_report=str(report), updated_at=_timestamp())
         write(path, state)
         return _hook_output("block", "Файлы изменились во время ревью; повторите проверку нового снимка. "
                             f"[codex-auto-review-continuation:{state['continuation_token']}]")
@@ -212,7 +218,10 @@ def _stop_locked(repo: Path, session: str, path: Path, state: dict,
     report = _save_report(repo, session, cfg, home, baseline, current, findings, status, round_no)
     reviewed = state.get("reviewed", {})
     reviewed[cache_key] = status
-    state.update(reviewed=reviewed, rounds=round_no, status=status, last_report=str(report),
+    reports_by_tree = state.get("reports_by_tree", {})
+    reports_by_tree[cache_key] = str(report)
+    state.update(reviewed=reviewed, reports_by_tree=reports_by_tree,
+                 rounds=round_no, status=status, last_report=str(report),
                  last_findings=len(findings), changed_files=len(changed),
                  last_error_tree="", updated_at=_timestamp())
     write(path, state)
