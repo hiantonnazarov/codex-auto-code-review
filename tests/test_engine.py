@@ -37,7 +37,7 @@ def test_hook_roundtrip_fix_and_review(monkeypatch, repo: Path, tmp_path: Path) 
     assert blocked["decision"] == "block"
     # Одно и то же дерево не проверяется повторно и не блокируется бесконечно.
     unchanged = handle("Stop", env, home)
-    assert "нерешёнными" in unchanged["systemMessage"]
+    assert "Ревью НЕ ПРОЙДЕНО" in unchanged["systemMessage"]
     assert len(calls) == 1
     (repo / "x.py").write_text("def f():\n    return 3\n")
     passed = handle("Stop", env, home)
@@ -68,7 +68,7 @@ def test_max_rounds_finishes_with_warning(monkeypatch, repo, tmp_path) -> None:
     handle("UserPromptSubmit", env, tmp_path)
     (repo / "x.py").write_text("a=5\n")
     response = handle("Stop", env, tmp_path)
-    assert "последнем разрешённом раунде" in response["systemMessage"]
+    assert "последний разрешённый раунд" in response["systemMessage"]
     assert "Ошибка" in response["systemMessage"]
 
 
