@@ -40,6 +40,7 @@ class Config:
     confidence_threshold: float = 0.65
     blocking_priorities: tuple[str, ...] = ("P0", "P1", "P2")
     max_review_rounds: int = 3
+    max_task_chars: int = 50000  # полный исходный запрос, не обрезать молча
     max_diff_chars_per_chunk: int = 26000
     max_chunks: int = 6
     timeout_seconds_per_chunk: int = 100
@@ -84,7 +85,8 @@ def _apply(config: Config, changes: dict[str, Any], origin: Path) -> Config:
         raise ValueError("confidence_threshold должен находиться в диапазоне от 0 до 1")
     if any(getattr(config, k) < minimum for k, minimum in (
         ("min_changed_lines", 0), ("min_changed_files", 1),
-        ("max_review_rounds", 1), ("max_diff_chars_per_chunk", 1000),
+        ("max_review_rounds", 1), ("max_task_chars", 1000),
+        ("max_diff_chars_per_chunk", 1000),
         ("max_chunks", 1), ("timeout_seconds_per_chunk", 1),
     )):
         raise ValueError("Недопустимое отрицательное или слишком маленькое числовое значение настройки")
