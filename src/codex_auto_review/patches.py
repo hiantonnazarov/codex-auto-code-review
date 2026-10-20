@@ -52,7 +52,9 @@ def _relative(raw: str, repo: Path) -> str:
         raise CaptureError("Пустой или некорректный путь в apply_patch")
     # Пути Windows и POSIX валидируются без угадывания текущей директории.
     normalized = raw.replace("\\", "/")
-    if any(part in (".", "..", "") for part in normalized.split("/")):
+    if any(part in (".", "..", "") for part in normalized.split("/")) or (
+        normalized.split("/")[0].lower() == ".git"
+    ):
         raise CaptureError(f"Небезопасный путь: {raw!r}")
     if PureWindowsPath(raw).drive or normalized.startswith("/"):
         resolved = Path(raw).resolve()
