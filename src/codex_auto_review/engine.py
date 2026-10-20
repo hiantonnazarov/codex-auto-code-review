@@ -1,4 +1,4 @@
-"""Lifecycle orchestration: snapshot -> significance -> review -> feedback -> retry."""
+"""Оркестрация: снимок -> значимость -> ревью -> замечания -> повторная проверка."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -68,14 +68,14 @@ def _save_report(repo: Path, session: str, cfg: Config, home: Path | None,
 
 
 def _feedback(blocking: list[Finding], all_findings: list[Finding], report: Path, round_no: int) -> str:
-    out = [f"Independent Codex review (round {round_no}): {len(blocking)} blocking findings ",
-           f"({len(all_findings)} total). Fix all confirmed P0-P2 findings and rerun tests.",
-           "If a finding is a false positive, explain with concrete evidence; do not change unrelated files."]
+    out = [f"Независимое ревью Codex (раунд {round_no}): {len(blocking)} блокирующих замечаний ",
+           f"(всего {len(all_findings)}). Исправьте подтверждённые ошибки P0–P2 и повторно запустите тесты.",
+           "Если замечание ложно, обоснуйте это конкретными доказательствами. Не изменяйте несвязанные файлы."]
     for f in blocking[:12]:
         out.append(f"[{f.priority}, confidence={f.confidence:.2f}] {f.file}:{f.line} {f.title} — {f.explanation}")
     if len(blocking) > 12:
-        out.append(f"See report for {len(blocking) - 12} additional issues.")
-    out.append(f"Full JSON report: {report}")
+        out.append(f"Ещё {len(blocking) - 12} замечаний приведены в отчёте.")
+    out.append(f"Полный отчёт JSON: {report}")
     return "\n".join(out)
 
 
@@ -94,7 +94,7 @@ def submit(repo: Path, session: str, previous_message: str = "", home: Path | No
             })
         return {}
     except Exception as e:
-        return _hook_output(message=f"Auto review baseline error: {e}")
+        return _hook_output(message=f"Не удалось сохранить исходное состояние для ревью: {e}")
 
 
 def stop(repo: Path, session: str, home: Path | None = None) -> dict:
@@ -102,18 +102,18 @@ def stop(repo: Path, session: str, home: Path | None = None) -> dict:
     try:
         cfg = load_config(repo, home)
     except (OSError, ValueError) as e:
-        return _hook_output(message=f"Auto review config error: {e}")
+        return _hook_output(message=f"Ошибка конфигурации автоматического ревью: {e}")
     if not cfg.enabled:
         return {}
     try:
         with locked(path):
             state = read(path)
             if not state.get("baseline"):
-                return _hook_output(message="Auto review: no baseline for this turn; use 'codex-auto-review review' as fallback.")
+                return _hook_output(message="Нет исходного снимка для этого хода. Запустите резервную команду codex-auto-review review.")
             return _stop_locked(repo, session, path, state, cfg, home)
     except (GitError, ReviewerError, OSError, ValueError, RuntimeError) as e:
-        # Do not mark unknown review results as successful.
-        msg = f"Auto review failed (not passed): {e}. Run 'codex-auto-review review' to retry."
+        # Неизвестный результат ревью нельзя отмечать как успешный.
+        msg = f"Автоматическое ревью не выполнено (проверка не пройдена): {e}. Повторите командой codex-auto-review review."
         try:
             state = read(path)
             state.update(status="error", last_error=str(e), updated_at=_timestamp())
@@ -135,16 +135,16 @@ def _stop_locked(repo: Path, session: str, path: Path, state: dict, cfg: Config,
     if prior:
         if prior == "passed":
             return {}
-        return _hook_output(message="Auto review: unchanged code still has unresolved findings; see previous review feedback.")
+        return _hook_output(message="Код не изменился, а замечания остались нерешёнными; см. предыдущий отчёт ревью.")
     if state["rounds"] >= cfg.max_review_rounds:
         state.update(status="limit_reached", updated_at=_timestamp())
         write(path, state)
-        return _hook_output(message=f"Auto review: maximum rounds ({cfg.max_review_rounds}) reached; unresolved findings require manual decision.")
+        return _hook_output(message=f"Достигнут лимит раундов ревью ({cfg.max_review_rounds}); нерешённые замечания требуют решения пользователя.")
     findings = run_review(repo, baseline, current, changed, cfg, state.get("previous_message", ""))
     if snapshot(repo) != current:
         state.update(status="stale_review", updated_at=_timestamp())
         write(path, state)
-        return _hook_output("block", "Auto review: files changed during review; repeat review on the new snapshot.")
+        return _hook_output("block", "Файлы изменились во время ревью; повторите проверку нового снимка.")
     blocking = [x for x in findings if x.priority in cfg.blocking_priorities and x.confidence >= cfg.confidence_threshold]
     status = "blocked" if blocking else "passed"
     report = _save_report(repo, session, cfg, home, baseline, current, findings, status)
@@ -156,9 +156,9 @@ def _stop_locked(repo: Path, session: str, path: Path, state: dict, cfg: Config,
     write(path, state)
     if blocking:
         if state["rounds"] >= cfg.max_review_rounds:
-            return _hook_output(message="Auto review: final allowed review round found unresolved defects. " + _feedback(blocking, findings, report, state["rounds"]))
+            return _hook_output(message="На последнем разрешённом раунде ревью остались неисправленные ошибки. " + _feedback(blocking, findings, report, state["rounds"]))
         return _hook_output("block", _feedback(blocking, findings, report, state["rounds"]))
-    return _hook_output(message=f"Independent Codex review PASSED ({len(changed)} files, {len(findings)} nonblocking findings). Report: {report}")
+    return _hook_output(message=f"Независимое ревью Codex ПРОЙДЕНО (файлов: {len(changed)}, неблокирующих замечаний: {len(findings)}). Отчёт: {report}")
 
 
 def manual_review(repo: Path, home: Path | None = None, force: bool = True) -> dict:
@@ -172,7 +172,7 @@ def manual_review(repo: Path, home: Path | None = None, force: bool = True) -> d
         return {"status": "insignificant", "findings": []}
     findings = run_review(repo, base, current, selected, cfg)
     if snapshot(repo) != current:
-        raise ReviewerError("Files changed during review; repeat review on the current snapshot")
+        raise ReviewerError("Файлы изменились во время ревью; повторите проверку текущего снимка")
     blocking = [f for f in findings if f.priority in cfg.blocking_priorities and f.confidence >= cfg.confidence_threshold]
     report = _save_report(repo, "manual", cfg, home, base, current, findings, "blocked" if blocking else "passed")
     return {"status": "blocked" if blocking else "passed", "report": str(report),
@@ -184,13 +184,13 @@ def handle(event: str, payload: dict, home: Path | None = None) -> dict:
         return {}
     session = str(payload.get("session_id") or payload.get("thread_id") or "")
     if not session:
-        return _hook_output(message="Auto review: missing session_id; hook cannot associate changes with a turn.")
+        return _hook_output(message="Отсутствует session_id: хук не может связать изменения с текущим ходом.")
     try:
         repo = root(Path(payload.get("cwd") or os.getcwd()))
     except (GitError, FileNotFoundError, OSError):
-        return {}  # Non-Git sessions are valid.
+        return {}  # Работа вне Git-репозитория допустима.
     if event == "UserPromptSubmit":
         return submit(repo, session, str(payload.get("prompt", "")), home)
     if event == "Stop":
         return stop(repo, session, home)
-    raise ValueError(f"Unknown hook event: {event}")
+    raise ValueError(f"Неизвестное событие хука: {event}")
