@@ -98,6 +98,40 @@ def test_missing_capture_fields_do_not_mark_review_success(repo, tmp_path):
     assert "НЕ ПРОЙДЕНО" in failure["systemMessage"]
 
 
+def test_original_task_required_for_actual_patch(monkeypatch, repo, tmp_path):
+    import codex_auto_review.engine as engine
+    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
+    monkeypatch.setattr(engine, "run_review", lambda *args: 1 / 0)
+    initial = prompt(repo, value="")
+    handle("UserPromptSubmit", initial, tmp_path)
+    post(repo, tmp_path)
+    outcome = handle("Stop", initial, tmp_path)
+    assert "НЕ ПРОЙДЕНО" in outcome["systemMessage"]
+    assert "Исходное пользовательское задание" in outcome["systemMessage"]
+
+
+def test_missing_fix_does_not_silently_pass(monkeypatch, repo, tmp_path):
+    import codex_auto_review.engine as engine
+    (tmp_path / "config.toml").write_text('[review]\nmode="all"\nmax_review_rounds=2\n')
+    monkeypatch.setattr(engine, "run_review",
+                        lambda *args: [Finding("P1", "x.py", 1, "Bug", "Fails", .99)])
+    request = prompt(repo)
+    handle("UserPromptSubmit", request, tmp_path)
+    post(repo, tmp_path)
+    first = handle("Stop", request, tmp_path)
+    assert first["decision"] == "block"
+    nofix = prompt(repo, turn="T2", value=first["reason"])
+    handle("UserPromptSubmit", nofix, tmp_path)
+    again = handle("Stop", nofix, tmp_path)
+    assert again["decision"] == "block"
+    last = prompt(repo, turn="T3", value=again["reason"])
+    handle("UserPromptSubmit", last, tmp_path)
+    outcome = handle("Stop", last, tmp_path)
+    assert "НЕ ПРОЙДЕНО" in outcome["systemMessage"]
+    assert "Остались блокирующие" in outcome["systemMessage"]
+    assert read(state_path(repo, "S", tmp_path))["status"] == "limit_reached"
+
+
 def test_no_git_scan_even_if_committed_and_staged_files(monkeypatch, repo, tmp_path):
     import subprocess
     import codex_auto_review.engine as engine
