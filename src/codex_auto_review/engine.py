@@ -31,7 +31,8 @@ def significant(files: list[Change], cfg: Config) -> bool:
         return False
     if cfg.mode == "all":
         return True
-    return (len({f.path for f in files}) >= cfg.min_changed_files
+    return (any(f.structural for f in files)
+            or len({f.path for f in files}) >= cfg.min_changed_files
             or sum(f.additions + f.deletions for f in files) >= cfg.min_changed_lines)
 
 
@@ -131,7 +132,7 @@ def _policy_key(cfg: Config) -> str:
 
 def _error(repo: Path, session: str, turn_id: str, cfg: Config,
            home: Path | None, path: Path, state: dict, exc: Exception) -> dict:
-    digest = state.get("last_diff_sha256", "")
+    digest = state.get("last_patch_sha256", "")
     message = f"Ревью НЕ ПРОЙДЕНО: ошибка захвата apply_patch или reviewer: {exc}"
     try:
         report = _save_report(repo, session, turn_id, cfg, home, digest, [],
@@ -139,7 +140,7 @@ def _error(repo: Path, session: str, turn_id: str, cfg: Config,
         state["last_report"] = str(report)
     except (OSError, ValueError) as report_error:
         message += f"; не удалось записать отчёт: {report_error}"
-    state.update(status="error", last_error=str(exc), last_error_diff=digest,
+    state.update(status="error", last_error=str(exc), last_error_patch=digest,
                  updated_at=_timestamp())
     try:
         write(path, state)
@@ -183,19 +184,33 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
     files = code_changes(repo, session, turn_id, cfg, home)
     if not significant(files, cfg):
         if state.get("unresolved_findings"):
-            state.update(status="blocked", updated_at=_timestamp())
+            attempts = state.get("no_fix_attempts", 0) + 1
+            state.update(no_fix_attempts=attempts, status="blocked", updated_at=_timestamp())
+            if attempts >= cfg.max_review_rounds:
+                state["status"] = "limit_reached"
+                write(path, state)
+                return _hook_output(message=(
+                    "Auto Code Review: НЕ ПРОЙДЕНО — исправлений через apply_patch нет; "
+                    "достигнут лимит попыток продолжения. Остались блокирующие замечания. "
+                    f"Отчёт: {state.get('last_report', '')}"
+                ))
             write(path, state)
-            return _hook_output(message="Ревью НЕ ПРОЙДЕНО: после замечаний не поступило "
-                                "значимых исправлений через apply_patch. "
-                                f"Отчёт: {state.get('last_report', '')}")
+            return _hook_output("block", (
+                "Auto Code Review: предыдущие блокирующие замечания НЕ исправлены. "
+                "Внесите исправления через apply_patch и повторите проверку. "
+                f"Отчёт: {state.get('last_report', '')}\n"
+                f"[codex-auto-review-continuation:{state.get('continuation_token', '')}]"
+            ))
         state.update(status="skipped_insignificant",
                      changed_files=len({f.path for f in files}),
                      source="posttooluse-apply-patch", updated_at=_timestamp())
         write(path, state)
         return {}
+    if not isinstance(state.get("previous_message"), str) or not state["previous_message"].strip():
+        raise CaptureError("Исходное пользовательское задание отсутствует: ревью невозможно")
     filtered_diff = "".join(f.diff for f in files)
     digest = sha256(filtered_diff.encode("utf-8")).hexdigest()
-    state["last_diff_sha256"] = digest
+    state["last_patch_sha256"] = digest
     cache_key = f"{turn_id}:{digest}:{_policy_key(cfg)}"
     prior = state.get("reviewed", {}).get(cache_key)
     if prior in ("passed", "blocked"):
@@ -207,7 +222,7 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
     if prior == "blocked":
         return _hook_output(message=f"Ревью НЕ ПРОЙДЕНО: diff не изменился после замечаний. "
                             f"Нужно исправление или решение пользователя. Отчёт: {state.get('last_report')}")
-    if state.get("status") == "error" and state.get("last_error_diff") == digest:
+    if state.get("status") == "error" and state.get("last_error_patch") == digest:
         return _hook_output(message=f"Ревью НЕ ПРОЙДЕНО: предыдущая ошибка не устранена: "
                             f"{state.get('last_error')}")
     if state.get("rounds", 0) >= cfg.max_review_rounds:
@@ -237,6 +252,7 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
     reports = state.get("reports_by_diff", {})
     reports[cache_key] = str(report)
     state.update(reviewed=reviewed, reports_by_diff=reports, rounds=round_no,
+                 no_fix_attempts=0,
                  status=status, last_report=str(report), last_findings=len(findings),
                  unresolved_findings=bool(blocking),
                  changed_files=len({f.path for f in files}), updated_at=_timestamp())
