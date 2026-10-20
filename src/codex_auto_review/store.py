@@ -1,4 +1,4 @@
-"""Atomic on-disk per-session state with a lock to prevent duplicate reviewers."""
+"""Атомарное сохранение состояния сессии с блокировкой от дублирующих ревью."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -40,7 +40,7 @@ def locked(path: Path, stale_seconds: int = 1800) -> Iterator[None]:
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
-        # Do not steal a live lock merely because a reviewer is slow.
+        # Нельзя снимать действующую блокировку только потому, что ревьюер работает долго.
         try:
             age = time.time() - lock.stat().st_mtime
         except FileNotFoundError:
@@ -52,7 +52,7 @@ def locked(path: Path, stale_seconds: int = 1800) -> Iterator[None]:
                 pass
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         else:
-            raise RuntimeError("review already running in this session") from None
+            raise RuntimeError("В этой сессии уже выполняется ревью") from None
     try:
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
