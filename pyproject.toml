@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-auto-code-review"
-version = "0.1.0"
+version = "0.2.0"
 description = "Автоматическое независимое ревью значительных локальных изменений Codex с циклом исправлений"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "Участники проекта codex-auto-code-review"}]
 license = "MIT"
-keywords = ["codex", "code-review", "git", "hooks", "agents"]
+keywords = ["codex", "code-review", "app-server", "hooks", "agents"]
 
 [project.scripts]
 codex-auto-review = "codex_auto_review.cli:main"

@@ -5,6 +5,9 @@ import argparse
 from dataclasses import asdict
 import json
 import os
+import re
+import stat
+from uuid import uuid4
 from pathlib import Path
 import shlex
 import shutil
@@ -13,7 +16,8 @@ import sys
 
 from .config import HOME_DIR, load_config
 from .engine import handle, manual_review
-from .git import GitError, root
+from .appserver import AppServerError, ingest, repo_root
+from .proxy import run_proxy
 from .store import read, state_path
 
 HOOK_EVENTS = ("UserPromptSubmit", "Stop")
@@ -28,8 +32,19 @@ def command_for(event: str) -> str:
     return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
 
 
+def _command_owned(hook: object) -> bool:
+    if not isinstance(hook, dict):
+        return False
+    command = hook.get("command", "")
+    return isinstance(command, str) and re.search(
+        r"(?:^|\s)-m\s+codex_auto_review\.cli\s+hook\s+(?:Stop|UserPromptSubmit)(?:\s|$)",
+        command,
+    ) is not None
+
+
 def _owned(entry: dict) -> bool:
-    return any("codex_auto_review.cli" in h.get("command", "") for h in entry.get("hooks", []) if isinstance(h, dict))
+    return (isinstance(entry, dict) and isinstance(entry.get("hooks"), list)
+            and any(_command_owned(h) for h in entry["hooks"]))
 
 
 def _without_owned(entries: list[dict]) -> list[dict]:
@@ -39,9 +54,7 @@ def _without_owned(entries: list[dict]) -> list[dict]:
         if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
             result.append(entry)
             continue
-        remaining = [hook for hook in entry["hooks"] if not (
-            isinstance(hook, dict) and "codex_auto_review.cli" in hook.get("command", "")
-        )]
+        remaining = [hook for hook in entry["hooks"] if not _command_owned(hook)]
         if remaining:
             result.append({**entry, "hooks": remaining})
     return result
@@ -57,8 +70,14 @@ def install(path: Path) -> None:
         if not isinstance(entries, list):
             raise ValueError(f"hooks.{event}: ожидается массив")
         entries[:] = _without_owned(entries)
-        entries.append({"hooks": [{"type": "command", "command": command_for(event),
-                                     "timeout": 900 if event == "Stop" else 20}]})
+        handler = {"type": "command", "command": command_for(event),
+                   "timeout": 900 if event == "Stop" else 20}
+        if event == "Stop":
+            # Статический статус во время работы hook: Codex не поддерживает
+            # динамические сообщения о прогрессе из stdout запущенного hook.
+            # Формулировка верна даже когда код не изменился и reviewer не вызван.
+            handler["statusMessage"] = "Auto Code Review: проверяю, требуется ли ревью кода"
+        entries.append({"hooks": [handler]})
     _atomic_json(path, payload)
 
 
@@ -75,9 +94,12 @@ def uninstall(path: Path) -> None:
 
 def _atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".auto-review.tmp")
+    tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if os.name != "nt":
+            mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+            tmp.chmod(mode)
         tmp.replace(path)
     finally:
         tmp.unlink(missing_ok=True)
@@ -91,11 +113,22 @@ def _doctor() -> dict:
                       for event in HOOK_EVENTS}
     except (OSError, ValueError, TypeError):
         registered = {event: False for event in HOOK_EVENTS}
+    try:
+        observed = read(HOME_DIR / "hook-events.json")
+    except (ValueError, OSError):
+        observed = {}
     return {
+        "hook_events_observed": {
+            "last_UserPromptSubmit": observed.get("UserPromptSubmit"),
+            "last_Stop": observed.get("Stop"),
+            "stop_delivery_confirmed": bool(observed.get("Stop")),
+            "note": "Регистрация не подтверждает доставку Stop: проверьте время последнего события после пробного хода.",
+        },
         "python": sys.version.split()[0], "python_executable": sys.executable,
         "codex": shutil.which("codex"), "git": shutil.which("git"),
         "hooks_file": str(file), "registered": registered,
-        "known_limitation": "В некоторых версиях Codex Desktop/app-server событие Stop не вызывается; используйте ручную проверку.",
+        "appserver_source": "ТОЛЬКО turn/diff/updated через appserver-proxy или appserver-ingest",
+        "known_limitation": "Глобальный Stop hook не подписывается на App Server. Клиент обязан запускать proxy или передавать события; собственный Codex Desktop не подключается автоматически.",
     }
 
 
@@ -108,8 +141,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("config", help="Показать действующую конфигурацию ревью")
     status = sub.add_parser("status", help="Показать состояние сессии")
     status.add_argument("--session", required=True)
-    review = sub.add_parser("review", help="Ручная проверка всех локальных изменений относительно HEAD")
+    review = sub.add_parser("review", help="Ручное ревью СОХРАНЁННОГО diff Codex App Server")
     review.add_argument("--cwd", default=".")
+    review.add_argument("--session", required=True, help="threadId события App Server")
+    review.add_argument("--turn", required=True, help="turnId события App Server")
+    sub.add_parser("appserver-proxy", help="Прозрачный JSONL relay для запуска клиентом вместо codex app-server")
+    sub.add_parser("appserver-ingest", help="Принять уведомления Codex App Server JSONL на stdin")
     hook = sub.add_parser("hook", help=argparse.SUPPRESS)
     hook.add_argument("event", choices=HOOK_EVENTS)
     args = parser.parse_args(argv)
@@ -124,13 +161,29 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "doctor":
             print(json.dumps(_doctor(), indent=2, ensure_ascii=False))
         elif args.command == "config":
-            print(json.dumps(asdict(load_config(root(Path.cwd()), HOME_DIR)), indent=2))
+            try:
+                repo = repo_root(Path.cwd())
+            except AppServerError:
+                repo = None
+            print(json.dumps(asdict(load_config(repo, HOME_DIR)), indent=2))
         elif args.command == "status":
-            print(json.dumps(read(state_path(root(Path.cwd()), args.session)), indent=2, ensure_ascii=False))
+            print(json.dumps(read(state_path(repo_root(Path.cwd()), args.session)), indent=2, ensure_ascii=False))
         elif args.command == "review":
-            answer = manual_review(root(Path(args.cwd)))
+            answer = manual_review(repo_root(Path(args.cwd)), args.session, args.turn)
             print(json.dumps(answer, ensure_ascii=False, indent=2))
             return 1 if answer["status"] == "blocked" else 0
+        elif args.command == "appserver-proxy":
+            return run_proxy(load_config())
+        elif args.command == "appserver-ingest":
+            count = 0
+            for line in sys.stdin:
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("Событие App Server должно быть JSON-объектом")
+                count += int(ingest(event))
+            print(json.dumps({"ingested_events": count}, ensure_ascii=False))
         elif args.command == "hook":
             try:
                 payload = json.load(sys.stdin)
@@ -142,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = {"systemMessage": f"Ошибка хука автоматического ревью (проверка не пройдена): {type(e).__name__}: {e}"}
             print(json.dumps(result, ensure_ascii=False))
         return 0
-    except (OSError, ValueError, GitError, RuntimeError) as e:
+    except (OSError, ValueError, AppServerError, RuntimeError) as e:
         print(f"codex-auto-review: {e}", file=sys.stderr)
         return 2
 

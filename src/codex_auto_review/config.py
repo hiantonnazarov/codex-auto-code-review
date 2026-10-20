@@ -5,6 +5,7 @@ from dataclasses import dataclass, fields, replace
 from fnmatch import fnmatch
 from pathlib import Path
 import tomllib
+import warnings
 from typing import Any
 
 CONFIG_NAME = "config.toml"
@@ -23,11 +24,6 @@ class Config:
     mode: str = "significant"  # significant | all (только существенные изменения или любые)
     min_changed_lines: int = 30
     min_changed_files: int = 2
-    critical_globs: tuple[str, ...] = (
-        "**/auth/**", "**/security/**", "**/migrations/**", "**/schema/**",
-        "**/api/**", "**/concurrency/**", "**/payment/**",
-    )
-    include_globs: tuple[str, ...] = ("*",)
     exclude_globs: tuple[str, ...] = (
         "**/node_modules/**", "**/vendor/**", "**/dist/**", "**/build/**",
         "**/.venv/**", "**/coverage/**", "**/*.min.js", "**/*.lock",
@@ -38,6 +34,7 @@ class Config:
     confidence_threshold: float = 0.65
     blocking_priorities: tuple[str, ...] = ("P0", "P1", "P2")
     max_review_rounds: int = 3
+    max_task_chars: int = 50000  # полный исходный запрос, не обрезать молча
     max_diff_chars_per_chunk: int = 26000
     max_chunks: int = 6
     timeout_seconds_per_chunk: int = 100
@@ -55,6 +52,12 @@ def _apply(config: Config, changes: dict[str, Any], origin: Path) -> Config:
     known = {f.name: f for f in fields(Config)}
     result: dict[str, Any] = {}
     for name, value in changes.items():
+        if name in ("critical_globs", "include_globs"):
+            warnings.warn(
+                f"{name} больше не используется: App Server review поддерживает только exclude_globs",
+                DeprecationWarning, stacklevel=2,
+            )
+            continue
         if name not in known:
             raise ValueError(f"Неизвестная настройка {name!r} в {origin}")
         current = getattr(config, name)
@@ -82,7 +85,8 @@ def _apply(config: Config, changes: dict[str, Any], origin: Path) -> Config:
         raise ValueError("confidence_threshold должен находиться в диапазоне от 0 до 1")
     if any(getattr(config, k) < minimum for k, minimum in (
         ("min_changed_lines", 0), ("min_changed_files", 1),
-        ("max_review_rounds", 1), ("max_diff_chars_per_chunk", 1000),
+        ("max_review_rounds", 1), ("max_task_chars", 1000),
+        ("max_diff_chars_per_chunk", 1000),
         ("max_chunks", 1), ("timeout_seconds_per_chunk", 1),
     )):
         raise ValueError("Недопустимое отрицательное или слишком маленькое числовое значение настройки")
