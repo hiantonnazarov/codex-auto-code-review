@@ -1,23 +1,37 @@
 # Codex Auto Code Review
 
-**Automatic, independent, local code review after significant edits in Codex.** Windows-native, Linux and macOS. Pure Python 3.11+ standard library and Codex CLI; no Claude account, Docker, WSL, external API keys or GitHub PRs required.
+**Автоматическое независимое ревью кода после существенных изменений, внесённых Codex.**
 
-> **Important:** Some Codex Desktop/app-server versions do not dispatch `Stop` hooks reliably ([upstream issue #38213](https://github.com/openai/codex/issues/38213)). No hook-based project can solve missing host events. Use the included manual fallback when necessary; do not treat unverified automatic review as a safety guarantee.
+Система работает с обычными запросами в Codex: не нужно каждый раз запускать `/review`, вызывать отдельный навык или создавать Pull Request. Поддерживаются Windows (без WSL), Linux и macOS.
 
-## What it does
+**Зависимости:** Python 3.11+, Git, установленный и авторизованный Codex CLI. Не требуются Claude Code, Docker, отдельный сервис, GitHub PR или самостоятельный API-ключ.
 
-- **Any normal Codex prompt:** `UserPromptSubmit` records Git tree at start; `Stop` checks the *net changes in that turn*.
-- **Significant only:** default: ≥30 changed lines, ≥2 code files, or any critical-path code edit; optionally review every code change.
-- **Independent LLM invocation:** launches fresh, read-only `codex exec` and validates structured JSON findings.
-- **Same-thread feedback:** P0/P1/P2 high-confidence findings block Stop and ask the coding agent to fix them; review repeats against the *entire original task diff* after edits.
-- **Finite loops:** maximum 3 review rounds by default, with explicit unresolved warnings; identical tree is never reviewed twice.
-- **Safe Git baselines:** tracked, staged and untracked (nonignored) changes; never mutates your real Git index or commits.
-- **Large diffs:** chunked instead of silently truncated; cap violations become visible review failures.
-- **Transparent state:** per-session JSON reports, status, doctor, global/local TOML configuration, install/uninstall without overwriting unrelated hooks.
+> **Ограничение Codex Desktop:** некоторые версии app-server не вызывают `Stop hook` после завершения хода ([openai/codex#38213](https://github.com/openai/codex/issues/38213)). В этом случае автоматическое ревью не запустится. Используйте ручной запуск, пока работа хуков не подтверждена на вашей версии. Регистрация хуков сама по себе не доказывает их фактического срабатывания.
 
-## Installation
+## Как работает
 
-Prerequisites: Git, Python 3.11+, authenticated Codex CLI (`codex login status`). On Windows PowerShell:
+1. При начале пользовательского хода `UserPromptSubmit` сохраняет Git-снимок рабочего дерева как исходную точку.
+2. Codex реализует задачу, изменяет файлы и при необходимости запускает тесты.
+3. После завершения хода `Stop` сравнивает текущее состояние с исходным снимком. Незначительные изменения и документация по умолчанию не проверяются.
+4. При существенных изменениях запускается **отдельный `codex exec`** с доступом к репозиторию на чтение. Результат — проверяемый JSON со списком замечаний P0–P3.
+5. Если найдены блокирующие ошибки, хук возвращает их в исходный ход Codex для исправления. После правок система повторно проверяет **весь итоговый diff исходной задачи**, а не только последнюю правку.
+6. Завершение происходит после успешной проверки либо с явным предупреждением о нерешённых замечаниях/технической ошибке. Число раундов ограничено.
+
+По умолчанию ревью запускается, когда изменено **не менее 30 строк**, **не менее 2 файлов кода** **или** затронут критический путь (например, `auth` или `security`). Достаточно выполнения одного условия. Режим `all` проверяет любое релевантное изменение.
+
+Архитектура, исходные требования, контракты и критерии приёмки — в **[requirements.md](requirements.md)**. Документ является целевой спецификацией: не все описанные в нём улучшения уже реализованы.
+
+## Установка в Windows PowerShell
+
+Предварительно проверьте доступность Git и авторизацию Codex:
+
+```powershell
+git --version
+codex --version
+codex login status
+```
+
+Установите пакет и зарегистрируйте хуки:
 
 ```powershell
 py -m pip install --user git+https://github.com/hiantonnazarov/codex-auto-code-review.git
@@ -25,48 +39,88 @@ py -m codex_auto_review.cli install
 py -m codex_auto_review.cli doctor
 ```
 
-Alternative if `codex-auto-review` is on PATH: use `codex-auto-review install` and `codex-auto-review doctor`.
+**Перезапустите Codex**, откройте `/hooks` и разрешите два события: `UserPromptSubmit` и `Stop`. Хуки регистрируются в пользовательском `~/.codex/hooks.json`; сторонние записи сохраняются.
 
-**Restart Codex**, open `/hooks`, **enable/trust the two hooks** (`UserPromptSubmit` and `Stop`). Make a code change through an ordinary prompt and inspect the resulting JSON report. The installer stores hooks in the user-level `~/.codex/hooks.json`, keeping unrelated entries intact. Hooks apply across your Git repositories.
+Система устанавливается глобально: одна установка может обслуживать разные Git-репозитории и обычные диалоги Codex. **При этом автоматическое ревью зависит от работы хуков в используемом приложении Codex.**
 
-### Manual fallback / diagnostics
+## Конфигурация
+
+Полностью прокомментированный на русском **[config.toml](config.toml)** теперь лежит в корне репозитория. В нём описана каждая настройка, её тип, допустимые значения и последствия.
+
+Для использования настроек:
+
+- **Только в конкретном Git-проекте:** положите `config.toml` с разделом `[review]` в корень этого проекта.
+- **Во всех проектах:** скопируйте файл в `~/.codex-auto-code-review/config.toml`.
+- **Существующие настройки:** прежний локальный `.codex-auto-review.toml` по-прежнему поддерживается.
+
+**Приоритет (от низкого к высокому):** встроенные значения → глобальный `config.toml` → прежний локальный `.codex-auto-review.toml` → корневой `config.toml` проекта.
+
+Если корневой `config.toml` другого приложения **не содержит раздела `[review]`**, он игнорируется.
+
+Основные параметры:
+
+| Параметр | По умолчанию | Назначение |
+|---|---|---|
+| `enabled` | `true` | Включить автоматическую проверку |
+| `mode` | `"significant"` | `"significant"` по порогам либо `"all"` |
+| `min_changed_lines` | `30` | Минимум изменённых строк |
+| `min_changed_files` | `2` | Минимум изменённых файлов |
+| `critical_globs` | Маски критических путей | Запуск независимо от объёма изменений |
+| `reviewer_model` | `""` | Модель из настроек Codex CLI либо указанная явно |
+| `reasoning_effort` | `"high"` | `low`, `medium`, `high`, `xhigh` |
+| `max_review_rounds` | `3` | Ограничение числа повторных проверок |
+| `fail_open` | `true` | Действие при техническом сбое ревью |
+
+Полный перечень, включая фильтры, пороги уверенности, ограничения размера diff, таймауты и каталог отчётов, находится в `config.toml`.
+
+**Важно:** корневой `config.toml` самого репозитория этого инструмента применяется к нему при работе в его каталоге. Установка Python-пакета **не переносит этот файл автоматически** в конфигурации всех остальных Git-проектов.
+
+## Команды и диагностика
 
 ```powershell
-py -m codex_auto_review.cli review --cwd .
+# Показать найденные зависимости и регистрацию хуков
 py -m codex_auto_review.cli doctor
-py -m codex_auto_review.cli status --session YOUR_CODEX_SESSION_ID
+
+# Показать итоговые настройки для текущего репозитория
+py -m codex_auto_review.cli config
+
+# Резервный ручной запуск ревью незакоммиченных изменений относительно HEAD
+py -m codex_auto_review.cli review --cwd .
+
+# Посмотреть состояние заданной сессии
+py -m codex_auto_review.cli status --session SESSION_ID
+
+# Удалить только хуки этого инструмента
 py -m codex_auto_review.cli uninstall
 ```
 
-Manual `review` checks all uncommitted and untracked changes versus HEAD, and exits nonzero for blocking findings. It is not tied to a single prompt. Your Git working tree must be available to the CLI.
+Ручной `review` проверяет все незакоммиченные изменения, включая новые файлы (если Git их не игнорирует), **относительно HEAD**. Он не воспроизводит границы отдельного пользовательского запроса при отсутствии сохранённого снимка.
 
-## Configure
+Отчёты сохраняются в JSON вне репозитория: `~/.codex-auto-code-review/state/`. Reviewer не изменяет код; изменения вносит основной Codex. Если `fail_open=true`, технический сбой не превращается в успешное ревью: завершение разрешено **с сообщением об ошибке**.
 
-Copy [`examples/config.toml`](examples/config.toml) to `~/.codex-auto-code-review/config.toml` globally, or to `.codex-auto-review.toml` in a specific repository. Local values override global values.
+## Неполадки и решения
 
-```toml
-[review]
-mode = "significant"    # or "all"
-min_changed_lines = 30
-min_changed_files = 2
-reviewer_model = ""     # default Codex CLI model; use a supported ID to override
-reasoning_effort = "high"
-max_review_rounds = 3
-confidence_threshold = 0.65
-fail_open = true
-```
+| Симптом | Причина или проверка | Действие |
+|---|---|---|
+| Ревью не запускается в Codex Desktop | `doctor`, `/hooks`, [проблема app-server #38213](https://github.com/openai/codex/issues/38213) | Разрешить хуки, перезапустить Codex; при отсутствии события использовать ручной `review` |
+| Codex CLI не обнаружен / нет авторизации | `codex --version`, `codex login status` | Установить CLI и авторизоваться под тем же пользователем ОС |
+| Маленькие правки не проверяются | `min_changed_lines`, `min_changed_files`, `critical_globs` | Выбрать `mode = "all"` или снизить пороги |
+| Изменения были ещё до запроса | Исходный снимок создаётся при `UserPromptSubmit` | Запустить ручной `review` |
+| Ошибка схемы JSON | Совместимость выбранной модели с `--output-schema` | Проверить модель и версию Codex CLI |
+| Превышен лимит фрагментов diff | `max_chunks`, `max_diff_chars_per_chunk` | Увеличить лимиты или разбить задачу; ошибка не считается успешным ревью |
+| Повторяется одно и то же замечание | `status --session`, JSON-отчёт | Проверить, изменился ли код; одинаковые снимки не проверяются повторно |
+| Дочерний reviewer запускает новые хуки | Переменная `CODEX_AUTO_REVIEW_CHILD` | Проверить наследование окружения в дочернем процессе |
+| Потребовалась строгая гарантия ревью | Сам Codex-хост может не отправить `Stop` | Использовать отдельный внешний оркестратор или обязательную проверку в CI |
 
-Pure docs, generated files and ignored files are excluded by default. Fine-tune glob patterns in the example. Reports are stored **outside the source repo** by default under `~/.codex-auto-code-review/state/reports/`. The reviewer runs in a read-only sandbox; it is never authorized to repair files. Codex receives feedback to decide repairs.
-
-## Verification
+## Проверка проекта и разработка
 
 ```powershell
 py -m pip install pytest
 py -m pytest -q
 ```
 
-See [architecture](docs/ARCHITECTURE.md) and [troubleshooting](docs/TROUBLESHOOTING.md). Actual end-to-end invocation requires Codex installed, authenticated and a host version that dispatches hooks; CI tests use a deterministic fake reviewer to avoid model costs.
+Автоматические тесты проверяют Git-снимки, фильтры, повторные проверки, формат результатов, установку хуков и конфигурацию. В тестах используется поддельный ревьюер, поэтому **успешные unit-тесты не являются доказательством качества реального LLM-ревью или исправности событий Codex Desktop**.
 
-## License and attribution
+## Лицензия и благодарности
 
-MIT license. Original Python implementation, inspired by the concepts of [Just Every Auto Review](https://github.com/just-every/plugin-auto-review) and [Sendbird cc-plugin-codex](https://github.com/sendbird/cc-plugin-codex). No third-party code copied.
+Код распространяется по лицензии MIT. Реализация на Python самостоятельная; архитектурные идеи вдохновлены проектами [Just Every Auto Review](https://github.com/just-every/plugin-auto-review) и [Sendbird cc-plugin-codex](https://github.com/sendbird/cc-plugin-codex). Их исходный код в этот проект не копировался.
