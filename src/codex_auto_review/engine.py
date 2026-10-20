@@ -164,11 +164,11 @@ def stop(repo: Path, session: str, home: Path | None = None,
     try:
         with locked(path):
             state = read(path)
-            if state.get("turn_id") != turn_id:
-                state = {"session": session, "repo": str(repo), "turn_id": turn_id,
-                         "previous_message": "", "rounds": 0, "reviewed": {},
-                         "reports_by_diff": {}, "continuation_token": secrets.token_hex(12),
-                         "unresolved_findings": False, "status": "pending"}
+            if state.get("turn_id") != turn_id or "previous_message" not in state:
+                raise CaptureError(
+                    "Не получен UserPromptSubmit текущего хода: исходное задание "
+                    "неизвестно. Запускать ревью без требований запрещено."
+                )
             try:
                 return _stop_locked(repo, session, turn_id, path, state, cfg, home)
             except (CaptureError, ReviewerError, OSError, ValueError, RuntimeError) as exc:
@@ -185,7 +185,7 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
         if state.get("unresolved_findings"):
             state.update(status="blocked", updated_at=_timestamp())
             write(path, state)
-            return _hook_output(message= "Ревью НЕ ПРОЙДЕНО: после замечаний не поступило "
+            return _hook_output(message="Ревью НЕ ПРОЙДЕНО: после замечаний не поступило "
                                 "значимых исправлений через apply_patch. "
                                 f"Отчёт: {state.get('last_report', '')}")
         state.update(status="skipped_insignificant",
