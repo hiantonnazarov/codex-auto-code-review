@@ -5,6 +5,9 @@ import argparse
 from dataclasses import asdict
 import json
 import os
+import re
+import stat
+from uuid import uuid4
 from pathlib import Path
 import shlex
 import shutil
@@ -28,8 +31,20 @@ def command_for(event: str) -> str:
     return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
 
 
+def _command_owned(hook: object) -> bool:
+    if not isinstance(hook, dict):
+        return False
+    command = hook.get("command", "")
+    return isinstance(command, str) and re.search(
+        r"(?:^|\s)-m\s+codex_auto_review\.cli\s+hook\s+(?:Stop|UserPromptSubmit)(?:\s|$)",
+        command,
+    ) is not None
+
+
 def _owned(entry: dict) -> bool:
-    return any("codex_auto_review.cli" in h.get("command", "") for h in entry.get("hooks", []) if isinstance(h, dict))
+    return isinstance(entry, dict) and any(
+        _command_owned(h) for h in entry.get("hooks", []) if isinstance(entry.get("hooks"), list)
+    )
 
 
 def _without_owned(entries: list[dict]) -> list[dict]:
@@ -39,9 +54,7 @@ def _without_owned(entries: list[dict]) -> list[dict]:
         if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
             result.append(entry)
             continue
-        remaining = [hook for hook in entry["hooks"] if not (
-            isinstance(hook, dict) and "codex_auto_review.cli" in hook.get("command", "")
-        )]
+        remaining = [hook for hook in entry["hooks"] if not _command_owned(hook)]
         if remaining:
             result.append({**entry, "hooks": remaining})
     return result
@@ -75,9 +88,12 @@ def uninstall(path: Path) -> None:
 
 def _atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".auto-review.tmp")
+    tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if os.name != "nt":
+            mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+            tmp.chmod(mode)
         tmp.replace(path)
     finally:
         tmp.unlink(missing_ok=True)
@@ -91,7 +107,17 @@ def _doctor() -> dict:
                       for event in HOOK_EVENTS}
     except (OSError, ValueError, TypeError):
         registered = {event: False for event in HOOK_EVENTS}
+    try:
+        observed = read(HOME_DIR / "hook-events.json")
+    except (ValueError, OSError):
+        observed = {}
     return {
+        "hook_events_observed": {
+            "last_UserPromptSubmit": observed.get("UserPromptSubmit"),
+            "last_Stop": observed.get("Stop"),
+            "stop_delivery_confirmed": bool(observed.get("Stop")),
+            "note": "Регистрация не подтверждает доставку Stop: проверьте время последнего события после пробного хода.",
+        },
         "python": sys.version.split()[0], "python_executable": sys.executable,
         "codex": shutil.which("codex"), "git": shutil.which("git"),
         "hooks_file": str(file), "registered": registered,
@@ -124,7 +150,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "doctor":
             print(json.dumps(_doctor(), indent=2, ensure_ascii=False))
         elif args.command == "config":
-            print(json.dumps(asdict(load_config(root(Path.cwd()), HOME_DIR)), indent=2))
+            try:
+                repo = root(Path.cwd())
+            except GitError:
+                repo = None
+            print(json.dumps(asdict(load_config(repo, HOME_DIR)), indent=2))
         elif args.command == "status":
             print(json.dumps(read(state_path(root(Path.cwd()), args.session)), indent=2, ensure_ascii=False))
         elif args.command == "review":
