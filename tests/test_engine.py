@@ -49,7 +49,6 @@ def test_roundtrip_blocks_then_passes_without_git_diff(monkeypatch, repo: Path,
     ingest(event(sample()), tmp_path)
     blocked = handle("Stop", env, tmp_path)
     assert blocked["decision"] == "block"
-    assert "НАЙДЕНЫ" not in blocked["reason"]  # сообщение использует обычный текст без спецсимволов
     assert "НАЙДЕНЫ ОШИБКИ" in blocked["reason"]
     assert "файлов: 1" in blocked["reason"]
     assert "замечаний: 1 (P1: 1)" in blocked["reason"]
