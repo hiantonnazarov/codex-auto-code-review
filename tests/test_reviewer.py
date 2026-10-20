@@ -7,7 +7,7 @@ from codex_auto_review.reviewer import Finding, ReviewerError, chunks, run_revie
 
 
 def test_validate_findings() -> None:
-    d = dict(priority="P1", file="x.py", line=2, title="bug", explanation="wrong", confidence=.7)
+    d = dict(priority="P1", file="x.py", line=2, title="Ошибка", explanation="Неправильное поведение", confidence=.7)
     assert Finding.parse(d, {"x.py"}).priority == "P1"
     with pytest.raises(ReviewerError):
         Finding.parse({**d, "file": "../outside.py"}, {"x.py"})
@@ -19,7 +19,7 @@ def test_chunk_no_silent_truncation(repo: Path) -> None:
     base = snapshot(repo)
     (repo / "x.py").write_text("a = 1\n" * 1000)
     current = snapshot(repo)
-    with pytest.raises(ReviewerError, match="needs"):
+    with pytest.raises(ReviewerError, match="требуется"):
         chunks(repo, base, current, [Change("x.py", 1000, 0)], Config(max_diff_chars_per_chunk=1100, max_chunks=1))
     chunks_out = chunks(repo, base, current, [Change("x.py", 1000, 0)], Config(max_diff_chars_per_chunk=1100, max_chunks=100))
     assert len(chunks_out) > 1
@@ -35,9 +35,9 @@ def test_codex_cli_command_and_result(monkeypatch, repo: Path) -> None:
         assert "--sandbox" in command and "read-only" in command
         assert "--output-schema" in command and "--output-last-message" in command
         assert kwargs["env"]["CODEX_AUTO_REVIEW_CHILD"] == "1"
-        assert "UNTRUSTED DIFF" in kwargs["input"]
+        assert "НЕДОВЕРЕННЫЙ DIFF" in kwargs["input"]
         path = Path(command[command.index("--output-last-message") + 1])
-        path.write_text(json.dumps({"summary": "reviewed", "findings": []}))
+        path.write_text(json.dumps({"summary": "Проверено", "findings": []}))
         class Result:
             returncode = 0
             stderr = ""
