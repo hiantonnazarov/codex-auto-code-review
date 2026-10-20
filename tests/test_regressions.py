@@ -202,3 +202,31 @@ def test_ownership_detection_does_not_delete_foreign_commands() -> None:
     assert not _owned({"hooks": None})
     assert _owned({"hooks": [{"type": "command",
                              "command": "python -m codex_auto_review.cli hook Stop"}]})
+
+
+def test_cached_pass_restores_status_after_blocked_tree(
+    monkeypatch, repo: Path, tmp_path: Path
+) -> None:
+    import codex_auto_review.engine as engine
+    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n', encoding="utf-8")
+    calls = []
+    def fake(r, base, current, changed, cfg, previous_message=""):
+        calls.append(current)
+        return [] if len(calls) == 1 else [
+            Finding("P1", "x.py", 1, "Ошибка", "Некорректный код", 0.9)
+        ]
+    monkeypatch.setattr(engine, "run_review", fake)
+    env = {"cwd": str(repo), "session_id": "restore", "turn_id": "turn", "prompt": "изменить"}
+    handle("UserPromptSubmit", env, tmp_path)
+    (repo / "x.py").write_text("a = 1\n")
+    assert "ПРОЙДЕНО" in handle("Stop", env, tmp_path)["systemMessage"]
+    passed_tree = (repo / "x.py").read_text()
+    passed_report = read(state_path(repo, "restore", tmp_path))["last_report"]
+    (repo / "x.py").write_text("a = 2\n")
+    assert handle("Stop", env, tmp_path)["decision"] == "block"
+    (repo / "x.py").write_text(passed_tree)
+    assert handle("Stop", env, tmp_path) == {}
+    assert len(calls) == 2
+    restored = read(state_path(repo, "restore", tmp_path))
+    assert restored["status"] == "passed"
+    assert restored["last_report"] == passed_report
