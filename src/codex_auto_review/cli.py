@@ -87,7 +87,7 @@ def install(path: Path) -> None:
             "timeout": 900 if event == "Stop" else 20,
         }
         if event == "Stop":
-            handler["statusMessage"] = "Auto Code Review: проверяю изменения кода"
+            handler["statusMessage"] = "Auto Code Review: выполняю ревью изменений кода"
         group = {"hooks": [handler]}
         if event == "PostToolUse":
             group["matcher"] = "^apply_patch$"
