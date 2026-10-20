@@ -182,7 +182,9 @@ def stop(repo: Path, session: str, home: Path | None = None,
 def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
                  state: dict, cfg: Config, home: Path | None) -> dict:
     files = code_changes(repo, session, turn_id, cfg, home)
-    if not significant(files, cfg):
+    # После блокирующих замечаний любое подтверждённое исправление кода
+    # требует ревью, даже если первоначальный порог 30 строк не достигнут.
+    if not significant(files, cfg) and not (state.get("unresolved_findings") and files):
         if state.get("unresolved_findings"):
             attempts = state.get("no_fix_attempts", 0) + 1
             state.update(no_fix_attempts=attempts, status="blocked", updated_at=_timestamp())
