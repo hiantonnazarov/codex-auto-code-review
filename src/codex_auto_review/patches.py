@@ -25,6 +25,7 @@ class Change:
     additions: int
     deletions: int
     diff: str
+    structural: bool = False  # удаление/переименование без +/- строк
 
 
 def repo_root(start: Path) -> Path:
@@ -115,7 +116,8 @@ def parse_patch(command: str, repo: Path) -> list[Change]:
                 raise CaptureError(f"Неподдерживаемая строка apply_patch в {path}")
         # При удалении нет -строк; строка файла не читается, чтобы не захватить чужие изменения.
         fragment = "*** Begin Patch\n" + "".join(group) + "*** End Patch\n"
-        out.append(Change(path, additions, deletions, fragment))
+        out.append(Change(path, additions, deletions, fragment,
+                          structural=(kind == "Delete" or path != old_path)))
     return out
 
 
@@ -200,7 +202,8 @@ def record_patch(payload: dict, repo: Path, home: Path | None = None) -> bool:
                     "status": "success",
                     "files": [
                         {"path": f.path, "additions": f.additions,
-                         "deletions": f.deletions, "diff": f.diff} for f in files
+                         "deletions": f.deletions, "diff": f.diff,
+                         "structural": f.structural} for f in files
                     ],
                 }
             except (CaptureError, TypeError, ValueError) as exc:
@@ -226,9 +229,11 @@ def code_changes(repo: Path, session: str, turn: str, cfg: Config,
                 continue
             previous = merged.get(p)
             if previous is None:
-                merged[p] = Change(p, raw["additions"], raw["deletions"], raw["diff"])
+                merged[p] = Change(p, raw["additions"], raw["deletions"], raw["diff"],
+                                   raw.get("structural", False))
             else:
                 merged[p] = Change(p, previous.additions + raw["additions"],
                                    previous.deletions + raw["deletions"],
-                                   previous.diff + "\n" + raw["diff"])
+                                   previous.diff + "\n" + raw["diff"],
+                                   previous.structural or raw.get("structural", False))
     return list(merged.values())
