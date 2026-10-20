@@ -1,49 +1,81 @@
+"""Валидатор и запуск reviewer без Git-снимков."""
 import json
 from pathlib import Path
+import subprocess
+
 import pytest
+
+from codex_auto_review.appserver import Change, parse_diff
 from codex_auto_review.config import Config
-from codex_auto_review.git import Change, snapshot
 from codex_auto_review.reviewer import Finding, ReviewerError, chunks, run_review
 
 
-def test_validate_findings() -> None:
-    d = dict(priority="P1", file="x.py", line=2, title="Ошибка", explanation="Неправильное поведение", confidence=.7)
-    assert Finding.parse(d, {"x.py"}).priority == "P1"
-    with pytest.raises(ReviewerError):
-        Finding.parse({**d, "file": "../outside.py"}, {"x.py"})
-    with pytest.raises(ReviewerError):
-        Finding.parse({**d, "confidence": 9}, {"x.py"})
+def diff(file: str = "x.py", body: str = "a = 1\n") -> str:
+    return (f"diff --git a/{file} b/{file}\n"
+            f"--- a/{file}\n+++ b/{file}\n"
+            f"@@ -0,0 +1 @@\n+{body.rstrip()}\n")
 
 
-def test_chunk_no_silent_truncation(repo: Path) -> None:
-    base = snapshot(repo)
-    (repo / "x.py").write_text("a = 1\n" * 1000)
-    current = snapshot(repo)
+def test_strict_findings_validation() -> None:
+    data = dict(priority="P1", file="x.py", line=1, title="Bug",
+                explanation="Wrong value", confidence=0.9)
+    assert Finding.parse(data, {"x.py"}).priority == "P1"
+    for update in ({"file": "../escape.py"}, {"confidence": float("nan")},
+                   {"confidence": True}, {"line": 0}, {"priority": "P4"}):
+        with pytest.raises(ReviewerError):
+            Finding.parse({**data, **update}, {"x.py"})
+
+
+def test_chunks_no_silent_truncation() -> None:
+    data = diff(body="a=1\n") + "+a = 5\n" * 1000
+    changes = [Change("x.py", 1001, 0, data)]
     with pytest.raises(ReviewerError, match="требуется"):
-        chunks(repo, base, current, [Change("x.py", 1000, 0)], Config(max_diff_chars_per_chunk=1100, max_chunks=1))
-    chunks_out = chunks(repo, base, current, [Change("x.py", 1000, 0)], Config(max_diff_chars_per_chunk=1100, max_chunks=100))
-    assert len(chunks_out) > 1
-    assert all(len(x[1]) <= 1100 for x in chunks_out)
+        chunks(changes, Config(max_diff_chars_per_chunk=1100, max_chunks=1))
+    pieces = chunks(changes, Config(max_diff_chars_per_chunk=1100, max_chunks=100))
+    assert len(pieces) > 1
+    assert all(len(text) <= 1100 for _, text in pieces)
 
 
-def test_codex_cli_command_and_result(monkeypatch, repo: Path) -> None:
-    import codex_auto_review.reviewer as rev
-    base = snapshot(repo)
+def test_codex_readonly_command_and_structured_output(monkeypatch, repo: Path) -> None:
+    import codex_auto_review.reviewer as reviewer
     (repo / "x.py").write_text("a = 1\n")
-    current = snapshot(repo)
-    def fake_subprocess(command, **kwargs):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs["input"]))
         assert "--sandbox" in command and "read-only" in command
-        assert "--output-schema" in command and "--output-last-message" in command
+        assert "--output-schema" in command
         assert kwargs["env"]["CODEX_AUTO_REVIEW_CHILD"] == "1"
-        assert "НЕДОВЕРЕННЫЙ DIFF" in kwargs["input"]
-        path = Path(command[command.index("--output-last-message") + 1])
-        path.write_text(json.dumps({"summary": "Проверено", "findings": []}))
-        class Result:
-            returncode = 0
-            stderr = ""
-        return Result()
-    real_run = rev.subprocess.run
-    def dispatch(command, **kwargs):
-        return real_run(command, **kwargs) if command[0] == "git" else fake_subprocess(command, **kwargs)
-    monkeypatch.setattr(rev.subprocess, "run", dispatch)
-    assert run_review(repo, base, current, [Change("x.py", 1, 1)], Config()) == []
+        assert "Недоверенный" not in kwargs["input"] or "Diff" in kwargs["input"]
+        out = Path(command[command.index("--output-last-message") + 1])
+        out.write_text(json.dumps({"summary": "ok", "findings": []}))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(reviewer.subprocess, "run", fake_run)
+    assert run_review(repo, parse_diff(diff()), Config()) == []
+    assert len(calls) == 1
+
+
+def test_integrated_review_after_multiple_chunks(monkeypatch, repo: Path) -> None:
+    import codex_auto_review.reviewer as reviewer
+    (repo / "x.py").write_text("a = 1\n")
+    (repo / "y.py").write_text("b = 2\n")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(kwargs["input"])
+        out = Path(command[command.index("--output-last-message") + 1])
+        out.write_text(json.dumps({"summary": "ok", "findings": []}))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(reviewer.subprocess, "run", fake_run)
+    files = [Change("x.py", 250, 0, diff() + "+x = 1\n" * 250),
+             Change("y.py", 250, 0, diff("y.py") + "+y = 1\n" * 250)]
+    assert run_review(repo, files, Config(max_diff_chars_per_chunk=1100)) == []
+    assert len(calls) > 2
+    assert "ИНТЕГРАЦИОННОЕ" in calls[-1]
+
+
+def test_absent_source_file_is_valid_for_deleted_code(repo: Path) -> None:
+    from codex_auto_review.reviewer import _line_limits
+    assert _line_limits(repo, {"old-file.py"}) == {"old-file.py": 1}
