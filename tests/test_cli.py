@@ -15,6 +15,12 @@ def test_install_preserves_other_hooks_and_uninstall(tmp_path: Path) -> None:
     assert len(payload["hooks"]["Stop"]) == 2
     assert len(payload["hooks"]["UserPromptSubmit"]) == 1
     assert any(_owned(x) for x in payload["hooks"]["Stop"])
+    status = next(h for group in payload["hooks"]["Stop"]
+                  for h in group["hooks"] if "codex_auto_review.cli" in h.get("command", ""))
+    assert "Auto Code Review" in status["statusMessage"]
+    assert "ревью" in status["statusMessage"]
+    assert all("statusMessage" not in h for group in payload["hooks"]["UserPromptSubmit"]
+               for h in group["hooks"])
     uninstall(path)
     assert json.loads(path.read_text())["hooks"]["Stop"] == other["hooks"]["Stop"]
     assert json.loads(path.read_text())["hooks"]["SessionStart"] == other["hooks"]["SessionStart"]
