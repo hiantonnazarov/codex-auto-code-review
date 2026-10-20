@@ -1,4 +1,4 @@
-"""Global hook installer and CLI. Does not require WSL, Node libraries or API keys."""
+"""Глобальная установка хуков и CLI: без WSL, дополнительных библиотек Node.js и API-ключей."""
 from __future__ import annotations
 
 import argparse
@@ -33,7 +33,7 @@ def _owned(entry: dict) -> bool:
 
 
 def _without_owned(entries: list[dict]) -> list[dict]:
-    """Strip only our commands, preserving unrelated hooks even in mixed groups."""
+    """Удалять только собственные команды, сохраняя сторонние хуки в общих группах."""
     result: list[dict] = []
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
@@ -50,12 +50,12 @@ def _without_owned(entries: list[dict]) -> list[dict]:
 def install(path: Path) -> None:
     payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     if not isinstance(payload, dict) or not isinstance(payload.get("hooks", {}), dict):
-        raise ValueError("Invalid hooks.json: expected a hooks object")
+        raise ValueError("Некорректный hooks.json: ожидается объект hooks")
     hooks = payload.setdefault("hooks", {})
     for event in HOOK_EVENTS:
         entries = hooks.setdefault(event, [])
         if not isinstance(entries, list):
-            raise ValueError(f"hooks.{event} must be an array")
+            raise ValueError(f"hooks.{event}: ожидается массив")
         entries[:] = _without_owned(entries)
         entries.append({"hooks": [{"type": "command", "command": command_for(event),
                                      "timeout": 900 if event == "Stop" else 20}]})
@@ -95,20 +95,20 @@ def _doctor() -> dict:
         "python": sys.version.split()[0], "python_executable": sys.executable,
         "codex": shutil.which("codex"), "git": shutil.which("git"),
         "hooks_file": str(file), "registered": registered,
-        "known_limitation": "Stop hooks may not fire in some Codex Desktop/app-server versions; use manual review fallback.",
+        "known_limitation": "В некоторых версиях Codex Desktop/app-server событие Stop не вызывается; используйте ручную проверку.",
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="codex-auto-review")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("install", help="Install Codex global hooks; preserve existing hooks")
+    sub.add_parser("install", help="Установить глобальные хуки Codex без удаления существующих")
     sub.add_parser("uninstall", help="Remove only this tool's hooks")
-    sub.add_parser("doctor", help="Check hook registration and dependencies")
-    sub.add_parser("config", help="Print effective review configuration")
-    status = sub.add_parser("status", help="Read last session state")
+    sub.add_parser("doctor", help="Проверить зависимости и регистрацию хуков")
+    sub.add_parser("config", help="Показать действующую конфигурацию ревью")
+    status = sub.add_parser("status", help="Показать состояние сессии")
     status.add_argument("--session", required=True)
-    review = sub.add_parser("review", help="Manual fallback: inspect all local differences versus HEAD")
+    review = sub.add_parser("review", help="Ручная проверка всех локальных изменений относительно HEAD")
     review.add_argument("--cwd", default=".")
     hook = sub.add_parser("hook", help=argparse.SUPPRESS)
     hook.add_argument("event", choices=HOOK_EVENTS)
@@ -117,10 +117,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "install":
             path = codex_home() / "hooks.json"
             install(path)
-            print(f"Installed global Codex hooks: {path}. Restart Codex and enable/trust hooks in /hooks.")
+            print(f"Глобальные хуки Codex установлены: {path}. Перезапустите Codex и разрешите хуки через /hooks.")
         elif args.command == "uninstall":
             uninstall(codex_home() / "hooks.json")
-            print("Removed only codex-auto-review hooks. Restart Codex.")
+            print("Хуки codex-auto-review удалены. Перезапустите Codex.")
         elif args.command == "doctor":
             print(json.dumps(_doctor(), indent=2, ensure_ascii=False))
         elif args.command == "config":
@@ -135,11 +135,11 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 payload = json.load(sys.stdin)
                 if not isinstance(payload, dict):
-                    raise ValueError("Hook stdin must be an object")
+                    raise ValueError("Ввод хука через stdin должен содержать JSON-объект")
                 result = handle(args.event, payload)
             except Exception as e:
-                # Output must always remain valid JSON; never impersonate a passing review.
-                result = {"systemMessage": f"Auto review hook error (not passed): {type(e).__name__}: {e}"}
+                # Вывод всегда должен оставаться корректным JSON; ошибка не равнозначна успешному ревью.
+                result = {"systemMessage": f"Ошибка хука автоматического ревью (проверка не пройдена): {type(e).__name__}: {e}"}
             print(json.dumps(result, ensure_ascii=False))
         return 0
     except (OSError, ValueError, GitError, RuntimeError) as e:
