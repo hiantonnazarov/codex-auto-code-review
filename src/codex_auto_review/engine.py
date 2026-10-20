@@ -113,7 +113,7 @@ def submit(repo: Path, session: str, previous_message: str = "",
                 "turn_id": turn_id, "turn_started_at": _timestamp(),
                 "continuation_token": secrets.token_hex(12),
                 "rounds": 0, "reviewed": {},
-                "previous_message": previous_message[:2500], "status": "pending",
+                "previous_message": previous_message, "status": "pending",
             })
         return {}
     except Exception as e:
