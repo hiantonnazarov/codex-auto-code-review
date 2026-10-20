@@ -230,3 +230,19 @@ def test_cached_pass_restores_status_after_blocked_tree(
     restored = read(state_path(repo, "restore", tmp_path))
     assert restored["status"] == "passed"
     assert restored["last_report"] == passed_report
+
+
+def test_task_context_is_preserved_and_never_silently_truncated(
+    repo: Path, tmp_path: Path
+) -> None:
+    from codex_auto_review.reviewer import run_review
+    text = "Требование к системе. " * 200
+    env = {"cwd": str(repo), "session_id": "large-prompt", "turn_id": "t", "prompt": text}
+    handle("UserPromptSubmit", env, tmp_path)
+    assert read(state_path(repo, "large-prompt", tmp_path))["previous_message"] == text
+    baseline = snapshot(repo)
+    (repo / "x.py").write_text("a = 1\n")
+    current = snapshot(repo)
+    with pytest.raises(ReviewerError, match="max_task_chars"):
+        run_review(repo, baseline, current, changes(repo, baseline, current),
+                   Config(max_task_chars=1000), text)
