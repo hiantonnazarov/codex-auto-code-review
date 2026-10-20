@@ -38,7 +38,7 @@ class Config:
     max_diff_chars_per_chunk: int = 26000
     max_chunks: int = 6
     timeout_seconds_per_chunk: int = 100
-    fail_open: bool = True
+    fail_open: bool = False
     report_dir: str = ""  # пустая строка — каталог состояния приложения вне исходного кода
 
 
