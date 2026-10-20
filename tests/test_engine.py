@@ -83,7 +83,8 @@ def test_empty_docs_and_foreign_session_do_not_invoke_reviewer(monkeypatch, repo
     post(repo, tmp_path, session="B", path="payments.py")
     post(repo, tmp_path, session="A", path="README.md")
     assert handle("Stop", a, tmp_path) == {}
-    assert handle("Stop", prompt(repo, session="C"), tmp_path) == {}
+    missing = handle("Stop", prompt(repo, session="C"), tmp_path)
+    assert "НЕ ПРОЙДЕНО" in missing["systemMessage"]
 
 
 def test_missing_capture_fields_do_not_mark_review_success(repo, tmp_path):
@@ -92,11 +93,9 @@ def test_missing_capture_fields_do_not_mark_review_success(repo, tmp_path):
     item = {"session_id": "S", "turn_id": "T", "cwd": str(repo),
             "tool_name": "apply_patch", "tool_input": {"command": patch()},
             "tool_response": "Success. Updated the following files:\nM x.py\n"}
-    import pytest
-    from codex_auto_review.patches import CaptureError
-    with pytest.raises(CaptureError):
-        handle("PostToolUse", item, tmp_path)
-    assert handle("Stop", p, tmp_path) == {}
+    assert handle("PostToolUse", item, tmp_path) == {}
+    failure = handle("Stop", p, tmp_path)
+    assert "НЕ ПРОЙДЕНО" in failure["systemMessage"]
 
 
 def test_no_git_scan_even_if_committed_and_staged_files(monkeypatch, repo, tmp_path):
