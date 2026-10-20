@@ -168,9 +168,17 @@ def record_patch(payload: dict, repo: Path, home: Path | None = None) -> bool:
     session = payload.get("session_id")
     turn = payload.get("turn_id")
     call = payload.get("tool_use_id")
-    if not all(isinstance(x, str) and x for x in (session, turn, call)):
-        raise CaptureError("PostToolUse apply_patch: обязательны session_id, turn_id и tool_use_id")
+    if not all(isinstance(x, str) and x for x in (session, turn)):
+        raise CaptureError("PostToolUse apply_patch: обязательны session_id и turn_id")
     path = event_path(repo, session, turn, home)
+    if not isinstance(call, str) or not call:
+        with locked(path):
+            state = read(path)
+            state.setdefault("errors", []).append(
+                "PostToolUse apply_patch: отсутствует tool_use_id"
+            )
+            write(path, state)
+        return False
     with locked(path):
         state = read(path)
         seen = state.setdefault("calls", {})
