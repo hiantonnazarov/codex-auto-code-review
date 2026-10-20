@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="codex-auto-review")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("install", help="Установить глобальные хуки Codex без удаления существующих")
-    sub.add_parser("uninstall", help="Remove only this tool's hooks")
+    sub.add_parser("uninstall", help="Удалить только хуки этого инструмента")
     sub.add_parser("doctor", help="Проверить зависимости и регистрацию хуков")
     sub.add_parser("config", help="Показать действующую конфигурацию ревью")
     status = sub.add_parser("status", help="Показать состояние сессии")
