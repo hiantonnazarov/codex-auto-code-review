@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-auto-code-review"
+version = "0.1.0"
+description = "Automatic independent Codex code review for substantive local edits, with a stop-hook fix loop"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "codex-auto-code-review contributors"}]
+license = "MIT"
+keywords = ["codex", "code-review", "git", "hooks", "agents"]
+
+[project.scripts]
+codex-auto-review = "codex_auto_review.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,21 @@
+# Copy to ~/.codex-auto-code-review/config.toml for global settings,
+# or to <repo>/.codex-auto-review.toml for repository overrides.
+[review]
+enabled = true
+mode = "significant"   # "all" = any code change
+min_changed_lines = 30
+min_changed_files = 2
+critical_globs = ["**/auth/**", "**/security/**", "**/api/**", "**/migrations/**", "**/schema/**"]
+include_globs = ["*"]
+exclude_globs = ["**/node_modules/**", "**/vendor/**", "**/dist/**", "**/.venv/**", "**/*.min.js", "**/*.lock"]
+reviewer_model = ""    # empty = default model configured in Codex CLI
+reasoning_effort = "high"
+codex_command = "codex"
+confidence_threshold = 0.65
+blocking_priorities = ["P0", "P1", "P2"]
+max_review_rounds = 3
+max_diff_chars_per_chunk = 26000
+max_chunks = 6
+timeout_seconds_per_chunk = 100
+fail_open = true       # Review failures are visible, not silently marked PASS.
+report_dir = ""       # empty = ~/.codex-auto-code-review/state/reports/
