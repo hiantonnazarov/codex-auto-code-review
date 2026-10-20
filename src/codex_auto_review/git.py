@@ -41,9 +41,11 @@ def snapshot(repo: Path) -> str:
         Path(filename).unlink()  # git read-tree expects a not-yet-initialized index
         env = dict(os.environ, GIT_INDEX_FILE=filename, GIT_OPTIONAL_LOCKS="0")
         try:
-            run(repo, "read-tree", "HEAD", env=env)
+            run(repo, "rev-parse", "--verify", "HEAD^{tree}")
         except GitError:
             run(repo, "read-tree", "--empty", env=env)
+        else:
+            run(repo, "read-tree", "HEAD", env=env)
         run(repo, "add", "-A", "--", ".", env=env)
         return run(repo, "write-tree", env=env).decode().strip()
     finally:
@@ -60,6 +62,7 @@ class Change:
     additions: int
     deletions: int
     binary: bool = False
+    metadata: bool = False  # изменение режима, переименование либо иное изменение без numstat
 
 
 def changes(repo: Path, baseline: str, current: str) -> list[Change]:
@@ -68,7 +71,7 @@ def changes(repo: Path, baseline: str, current: str) -> list[Change]:
     raw = run(repo, "diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", baseline, current)
     # Формат Git --numstat -z: A\tD\tpath\0; при переименовании A\tD\t\0old\0new\0
     tokens = raw.split(b"\0")
-    result = []
+    result: list[Change] = []
     i = 0
     while i < len(tokens) and tokens[i]:
         parts = tokens[i].split(b"\t", 2)
@@ -82,7 +85,19 @@ def changes(repo: Path, baseline: str, current: str) -> list[Change]:
             path = tokens[i + 1]
             i += 2
         binary = a == b"-" or d == b"-"
-        result.append(Change(os.fsdecode(path), 0 if binary else int(a), 0 if binary else int(d), binary))
+        additions, deletions = (0, 0) if binary else (int(a), int(d))
+        result.append(Change(os.fsdecode(path), additions, deletions, binary,
+                             not binary and additions == 0 and deletions == 0))
+    # --numstat пропускает некоторые изменения атрибутов файлов (например chmod).
+    # --name-only здесь является отдельной проверкой полноты списка.
+    names = run(repo, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", baseline, current)
+    known = {item.path for item in result}
+    for name in names.split(b"\0"):
+        if name:
+            path = os.fsdecode(name)
+            if path not in known:
+                result.append(Change(path, 0, 0, metadata=True))
+                known.add(path)
     return result
 
 
