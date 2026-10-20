@@ -8,8 +8,9 @@ import json
 import os
 from pathlib import Path
 import secrets
+from uuid import uuid4
 
-from .config import Config, load_config, matches, is_code
+from .config import HOME_DIR, Config, load_config, matches, is_code
 from .git import Change, GitError, changes, head_tree, root, snapshot
 from .reviewer import Finding, ReviewerError, run_review
 from .store import locked, read, state_path, write
@@ -59,7 +60,7 @@ def _save_report(repo: Path, session: str, cfg: Config, home: Path | None,
                  baseline: str, current: str, checks: list[Finding], status: str,
                  round_no: int = 0, error: str | None = None) -> Path:
     folder = _report_location(repo, session, cfg, home)
-    path = folder / f"{current[:12] or 'unknown'}-{status}.json"
+    path = folder / f"{current[:12] or 'unknown'}-{status}-{uuid4().hex[:12]}.json"
     write(path, {
         "created_at": _timestamp(), "repo": str(repo), "session": session,
         "baseline_tree": baseline, "reviewed_tree": current, "status": status,
@@ -97,8 +98,9 @@ def submit(repo: Path, session: str, previous_message: str = "",
             # Stop->block создаёт автоматическое продолжение как новый prompt.
             # Если оно содержит собственный маркер, baseline исходной задачи сохраняется.
             token = old.get("continuation_token", "")
-            if (token and f"[codex-auto-review-continuation:{token}]" in previous_message
-                    and old.get("status") in ("blocked", "stale_review", "error")):
+            if (token and old.get("status") in ("blocked", "stale_review", "error")
+                    and (f"[codex-auto-review-continuation:{token}]" in previous_message
+                         or not previous_message.strip())):
                 old.update(turn_id=turn_id, updated_at=_timestamp())
                 write(path, old)
                 return {}
@@ -138,7 +140,10 @@ def _record_error(repo: Path, session: str, path: Path, state: dict,
         write(path, state)
     except (OSError, ValueError):
         pass
-    return _hook_output(message=message) if cfg.fail_open else _hook_output("block", message)
+    if cfg.fail_open:
+        return _hook_output(message=message)
+    token = state.get("continuation_token", "")
+    return _hook_output("block", message + f" [codex-auto-review-continuation:{token}]")
 
 
 def stop(repo: Path, session: str, home: Path | None = None) -> dict:
@@ -183,8 +188,11 @@ def _stop_locked(repo: Path, session: str, path: Path, state: dict,
         return _hook_output(message=f"Ревью НЕ ПРОЙДЕНО: код не изменён после замечаний. "
                             f"Нужно исправление или решение пользователя. Отчёт: {state.get('last_report')}")
     if state.get("last_error_tree") == current and state.get("status") == "error":
-        return _hook_output(message=f"Ревью НЕ ПРОЙДЕНО: повторная проверка после ошибки требует "
-                            f"явного вмешательства. {state.get('last_error')}")
+        message = ("Ревью НЕ ПРОЙДЕНО: повторная проверка после ошибки требует "
+                   f"явного вмешательства. {state.get('last_error')}")
+        if not cfg.fail_open:
+            return {"continue": False, "stopReason": message, "systemMessage": message}
+        return _hook_output(message=message)
     if state["rounds"] >= cfg.max_review_rounds:
         state.update(status="limit_reached", updated_at=_timestamp())
         write(path, state)
@@ -240,9 +248,22 @@ def manual_review(repo: Path, home: Path | None = None, force: bool = True) -> d
             "findings": [asdict(f) for f in findings]}
 
 
+def _record_hook_event(event: str, home: Path | None) -> None:
+    """Диагностика фактической доставки событий, без хранения пользовательского текста."""
+    file = (home or HOME_DIR) / "hook-events.json"
+    try:
+        with locked(file, max_wait_seconds=2):
+            events = read(file)
+            events[event] = _timestamp()
+            write(file, events)
+    except (OSError, ValueError, RuntimeError):
+        pass  # Мониторинг не должен ломать пользовательскую сессию.
+
+
 def handle(event: str, payload: dict, home: Path | None = None) -> dict:
     if os.environ.get("CODEX_AUTO_REVIEW_CHILD") == "1":
         return {}
+    _record_hook_event(event, home)
     session = str(payload.get("session_id") or payload.get("thread_id") or "")
     if not session:
         return _hook_output(message="Отсутствует session_id: хук не может связать изменения с текущим ходом.")
