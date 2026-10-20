@@ -98,6 +98,32 @@ def test_missing_capture_fields_do_not_mark_review_success(repo, tmp_path):
     assert "НЕ ПРОЙДЕНО" in failure["systemMessage"]
 
 
+def test_small_fix_is_reviewed_after_blocking_finding(monkeypatch, repo, tmp_path):
+    import codex_auto_review.engine as engine
+    calls = []
+
+    def mock_review(root, files, cfg, original):
+        calls.append((original, [f.path for f in files]))
+        return [Finding("P1", "x.py", 1, "Bug", "Wrong", .98)] if len(calls) == 1 else []
+
+    monkeypatch.setattr(engine, "run_review", mock_review)
+    p = prompt(repo, value="Проверь обработку ошибок")
+    handle("UserPromptSubmit", p, tmp_path)
+    post(repo, tmp_path, path="x.py", call="a")
+    post(repo, tmp_path, path="y.py", call="b")
+    first = handle("Stop", p, tmp_path)
+    assert first["decision"] == "block"
+    followup = prompt(repo, turn="T2", value=first["reason"])
+    handle("UserPromptSubmit", followup, tmp_path)
+    post(repo, tmp_path, turn="T2", path="x.py", call="c")
+    second = handle("Stop", followup, tmp_path)
+    assert "ПРОЙДЕНО" in second["systemMessage"]
+    assert calls == [
+        ("Проверь обработку ошибок", ["x.py", "y.py"]),
+        ("Проверь обработку ошибок", ["x.py"]),
+    ]
+
+
 def test_original_task_required_for_actual_patch(monkeypatch, repo, tmp_path):
     import codex_auto_review.engine as engine
     (tmp_path / "config.toml").write_text('[review]\nmode="all"\n')
