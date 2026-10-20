@@ -1,3 +1,3 @@
-"""Automatic independent reviews of edits made in a Codex turn."""
+"""Автоматическое независимое ревью изменений, внесённых за один ход Codex."""
 
 __version__ = "0.1.0"
