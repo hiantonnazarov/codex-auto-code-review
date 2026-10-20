@@ -27,21 +27,21 @@ def test_hook_roundtrip_fix_and_review(monkeypatch, repo: Path, tmp_path: Path) 
         calls.append(current)
         assert "x.py" in [c.path for c in files]
         if len(calls) == 1:
-            return [Finding("P1", "x.py", 2, "Regressed return", "Now returns wrong number", .9)]
+            return [Finding("P1", "x.py", 2, "Неверный результат функции", "Функция возвращает неверное значение", .9)]
         return []
     monkeypatch.setattr(engine, "run_review", fake_reviewer)
-    env = {"cwd": str(repo), "session_id": "session-1", "prompt": "Change function"}
+    env = {"cwd": str(repo), "session_id": "session-1", "prompt": "Измени функцию"}
     assert handle("UserPromptSubmit", env, home) == {}
     (repo / "x.py").write_text("def f():\n    return 2\n")
     blocked = handle("Stop", env, home)
     assert blocked["decision"] == "block"
-    # Same tree is never reviewed twice or blocked forever.
+    # Одно и то же дерево не проверяется повторно и не блокируется бесконечно.
     unchanged = handle("Stop", env, home)
-    assert "unresolved" in unchanged["systemMessage"]
+    assert "нерешёнными" in unchanged["systemMessage"]
     assert len(calls) == 1
     (repo / "x.py").write_text("def f():\n    return 3\n")
     passed = handle("Stop", env, home)
-    assert "PASSED" in passed["systemMessage"]
+    assert "ПРОЙДЕНО" in passed["systemMessage"]
     assert len(calls) == 2
     assert handle("Stop", env, home) == {}
     state = read(state_path(repo, "session-1", home))
@@ -63,13 +63,13 @@ def test_no_review_for_docs_and_no_edits(monkeypatch, repo, tmp_path) -> None:
 def test_max_rounds_finishes_with_warning(monkeypatch, repo, tmp_path) -> None:
     import codex_auto_review.engine as engine
     (tmp_path / "config.toml").write_text('[review]\nmode="all"\nmax_review_rounds=1\n')
-    monkeypatch.setattr(engine, "run_review", lambda *a, **kw: [Finding("P2", "x.py", 1, "Wrong", "Broken", .8)])
+    monkeypatch.setattr(engine, "run_review", lambda *a, **kw: [Finding("P2", "x.py", 1, "Ошибка", "Некорректное поведение", .8)])
     env = {"cwd": str(repo), "session_id": "s"}
     handle("UserPromptSubmit", env, tmp_path)
     (repo / "x.py").write_text("a=5\n")
     response = handle("Stop", env, tmp_path)
-    assert "final allowed review round" in response["systemMessage"]
-    assert "Wrong" in response["systemMessage"]
+    assert "последнем разрешённом раунде" in response["systemMessage"]
+    assert "Ошибка" in response["systemMessage"]
 
 
 def test_failure_visible_not_passed(monkeypatch, repo, tmp_path) -> None:
@@ -80,7 +80,7 @@ def test_failure_visible_not_passed(monkeypatch, repo, tmp_path) -> None:
     handle("UserPromptSubmit", env, tmp_path)
     (repo / "x.py").write_text("a=4\n")
     response = handle("Stop", env, tmp_path)
-    assert "not passed" in response["systemMessage"]
+    assert "не пройдена" in response["systemMessage"]
     assert read(state_path(repo, "s", tmp_path))["status"] == "error"
 
 
@@ -105,5 +105,5 @@ def test_changed_during_review_never_marked_pass(monkeypatch, repo, tmp_path):
     handle("UserPromptSubmit", env, tmp_path)
     (repo / "x.py").write_text("initial edit\n")
     result = handle("Stop", env, tmp_path)
-    assert result["decision"] == "block" and "files changed" in result["reason"]
+    assert result["decision"] == "block" and "Файлы изменились" in result["reason"]
     assert read(state_path(repo, "stale", tmp_path))["status"] == "stale_review"
