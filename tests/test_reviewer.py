@@ -5,15 +5,14 @@ import subprocess
 
 import pytest
 
-from codex_auto_review.appserver import Change, parse_diff
+from codex_auto_review.patches import Change, parse_patch
 from codex_auto_review.config import Config
 from codex_auto_review.reviewer import Finding, ReviewerError, chunks, run_review
 
 
 def diff(file: str = "x.py", body: str = "a = 1\n") -> str:
-    return (f"diff --git a/{file} b/{file}\n"
-            f"--- a/{file}\n+++ b/{file}\n"
-            f"@@ -0,0 +1 @@\n+{body.rstrip()}\n")
+    return (f"*** Begin Patch\n*** Add File: {file}\n"
+            f"+{body.rstrip()}\n*** End Patch\n")
 
 
 def test_strict_findings_validation() -> None:
@@ -52,7 +51,7 @@ def test_codex_readonly_command_and_structured_output(monkeypatch, repo: Path) -
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(reviewer.subprocess, "run", fake_run)
-    assert run_review(repo, parse_diff(diff()), Config()) == []
+    assert run_review(repo, parse_patch(diff(), repo), Config()) == []
     assert len(calls) == 1
 
 

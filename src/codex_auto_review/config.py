@@ -38,7 +38,7 @@ class Config:
     max_diff_chars_per_chunk: int = 26000
     max_chunks: int = 6
     timeout_seconds_per_chunk: int = 100
-    fail_open: bool = True
+    fail_open: bool = False
     report_dir: str = ""  # пустая строка — каталог состояния приложения вне исходного кода
 
 
@@ -54,7 +54,7 @@ def _apply(config: Config, changes: dict[str, Any], origin: Path) -> Config:
     for name, value in changes.items():
         if name in ("critical_globs", "include_globs"):
             warnings.warn(
-                f"{name} больше не используется: App Server review поддерживает только exclude_globs",
+                f"{name} больше не используется: PostToolUse review поддерживает только exclude_globs",
                 DeprecationWarning, stacklevel=2,
             )
             continue

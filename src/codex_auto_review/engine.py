@@ -1,4 +1,4 @@
-"""Оркестрация ревью: только Codex App Server turn/diff/updated, без Git diff."""
+"""Оркестрация ревью по успешным apply_patch, перехваченным в PostToolUse."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -10,7 +10,7 @@ import secrets
 from pathlib import Path
 from uuid import uuid4
 
-from .appserver import AppServerError, Change, code_changes, get_turn, repo_root
+from .patches import CaptureError, Change, code_changes, record_patch, repo_root
 from .config import HOME_DIR, Config, load_config
 from .reviewer import Finding, ReviewerError, run_review
 from .store import locked, read, state_path, write
@@ -31,7 +31,8 @@ def significant(files: list[Change], cfg: Config) -> bool:
         return False
     if cfg.mode == "all":
         return True
-    return (len({f.path for f in files}) >= cfg.min_changed_files
+    return (any(f.structural for f in files)
+            or len({f.path for f in files}) >= cfg.min_changed_files
             or sum(f.additions + f.deletions for f in files) >= cfg.min_changed_lines)
 
 
@@ -53,8 +54,8 @@ def _save_report(repo: Path, session: str, turn_id: str, cfg: Config,
     path = folder / f"{digest[:12] or 'unknown'}-{status}-{uuid4().hex[:12]}.json"
     write(path, {
         "created_at": _timestamp(), "repo": str(repo), "session": session,
-        "turn_id": turn_id, "source": "codex-app-server",
-        "reviewed_diff_sha256": digest, "status": status,
+        "turn_id": turn_id, "source": "posttooluse-apply-patch",
+        "reviewed_patch_sha256": digest, "status": status,
         "round": round_no, "error": error, "findings": [asdict(x) for x in findings],
     })
     return path
@@ -100,7 +101,7 @@ def submit(repo: Path, session: str, previous_message: str = "",
     if not cfg.enabled:
         return {}
     if not turn_id:
-        return _hook_output(message="Для App Server review отсутствует turn_id; проверка не запущена.")
+        return _hook_output(message="Отсутствует turn_id: невозможно связать задачу с apply_patch.")
     path = state_path(repo, session, home)
     try:
         with locked(path):
@@ -131,15 +132,15 @@ def _policy_key(cfg: Config) -> str:
 
 def _error(repo: Path, session: str, turn_id: str, cfg: Config,
            home: Path | None, path: Path, state: dict, exc: Exception) -> dict:
-    digest = state.get("last_diff_sha256", "")
-    message = f"Ревью НЕ ПРОЙДЕНО: ошибка данных App Server или reviewer: {exc}"
+    digest = state.get("last_patch_sha256", "")
+    message = f"Ревью НЕ ПРОЙДЕНО: ошибка захвата apply_patch или reviewer: {exc}"
     try:
         report = _save_report(repo, session, turn_id, cfg, home, digest, [],
                               "error", state.get("rounds", 0), str(exc))
         state["last_report"] = str(report)
     except (OSError, ValueError) as report_error:
         message += f"; не удалось записать отчёт: {report_error}"
-    state.update(status="error", last_error=str(exc), last_error_diff=digest,
+    state.update(status="error", last_error=str(exc), last_error_patch=digest,
                  updated_at=_timestamp())
     try:
         write(path, state)
@@ -159,19 +160,19 @@ def stop(repo: Path, session: str, home: Path | None = None,
     if not cfg.enabled:
         return {}
     if not turn_id:
-        return _hook_output(message="Отсутствует turn_id: событие App Server невозможно связать с ходом.")
+        return _hook_output(message="Отсутствует turn_id: нельзя выбрать apply_patch нужного хода.")
     path = state_path(repo, session, home)
     try:
         with locked(path):
             state = read(path)
-            if state.get("turn_id") != turn_id:
-                state = {"session": session, "repo": str(repo), "turn_id": turn_id,
-                         "previous_message": "", "rounds": 0, "reviewed": {},
-                         "reports_by_diff": {}, "continuation_token": secrets.token_hex(12),
-                         "unresolved_findings": False, "status": "pending"}
             try:
+                if state.get("turn_id") != turn_id or "previous_message" not in state:
+                    raise CaptureError(
+                        "Не получен UserPromptSubmit текущего хода: исходное задание "
+                        "неизвестно. Запускать ревью без требований запрещено."
+                    )
                 return _stop_locked(repo, session, turn_id, path, state, cfg, home)
-            except (AppServerError, ReviewerError, OSError, ValueError, RuntimeError) as exc:
+            except (CaptureError, ReviewerError, OSError, ValueError, RuntimeError) as exc:
                 return _error(repo, session, turn_id, cfg, home, path, state, exc)
     except (OSError, ValueError, RuntimeError) as exc:
         message = f"Ревью НЕ ПРОЙДЕНО: сбой хранения состояния: {exc}"
@@ -180,24 +181,38 @@ def stop(repo: Path, session: str, home: Path | None = None,
 
 def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
                  state: dict, cfg: Config, home: Path | None) -> dict:
-    observed = get_turn(session, turn_id, home)
-    current_diff = observed.get("diff", "")
-    files = code_changes(current_diff, cfg)
-    if not significant(files, cfg):
+    files = code_changes(repo, session, turn_id, cfg, home)
+    # После блокирующих замечаний любое подтверждённое исправление кода
+    # требует ревью, даже если первоначальный порог 30 строк не достигнут.
+    if not significant(files, cfg) and not (state.get("unresolved_findings") and files):
         if state.get("unresolved_findings"):
-            state.update(status="blocked", updated_at=_timestamp())
+            attempts = state.get("no_fix_attempts", 0) + 1
+            state.update(no_fix_attempts=attempts, status="blocked", updated_at=_timestamp())
+            if attempts >= cfg.max_review_rounds:
+                state["status"] = "limit_reached"
+                write(path, state)
+                return _hook_output(message=(
+                    "Auto Code Review: НЕ ПРОЙДЕНО — исправлений через apply_patch нет; "
+                    "достигнут лимит попыток продолжения. Остались блокирующие замечания. "
+                    f"Отчёт: {state.get('last_report', '')}"
+                ))
             write(path, state)
-            return _hook_output(message="Ревью НЕ ПРОЙДЕНО: после замечаний не поступило "
-                                "значимых исправлений кода от App Server. "
-                                f"Отчёт: {state.get('last_report', '')}")
+            return _hook_output("block", (
+                "Auto Code Review: предыдущие блокирующие замечания НЕ исправлены. "
+                "Внесите исправления через apply_patch и повторите проверку. "
+                f"Отчёт: {state.get('last_report', '')}\n"
+                f"[codex-auto-review-continuation:{state.get('continuation_token', '')}]"
+            ))
         state.update(status="skipped_insignificant",
                      changed_files=len({f.path for f in files}),
-                     source="codex-app-server", updated_at=_timestamp())
+                     source="posttooluse-apply-patch", updated_at=_timestamp())
         write(path, state)
         return {}
+    if not isinstance(state.get("previous_message"), str) or not state["previous_message"].strip():
+        raise CaptureError("Исходное пользовательское задание отсутствует: ревью невозможно")
     filtered_diff = "".join(f.diff for f in files)
     digest = sha256(filtered_diff.encode("utf-8")).hexdigest()
-    state["last_diff_sha256"] = digest
+    state["last_patch_sha256"] = digest
     cache_key = f"{turn_id}:{digest}:{_policy_key(cfg)}"
     prior = state.get("reviewed", {}).get(cache_key)
     if prior in ("passed", "blocked"):
@@ -209,7 +224,7 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
     if prior == "blocked":
         return _hook_output(message=f"Ревью НЕ ПРОЙДЕНО: diff не изменился после замечаний. "
                             f"Нужно исправление или решение пользователя. Отчёт: {state.get('last_report')}")
-    if state.get("status") == "error" and state.get("last_error_diff") == digest:
+    if state.get("status") == "error" and state.get("last_error_patch") == digest:
         return _hook_output(message=f"Ревью НЕ ПРОЙДЕНО: предыдущая ошибка не устранена: "
                             f"{state.get('last_error')}")
     if state.get("rounds", 0) >= cfg.max_review_rounds:
@@ -218,14 +233,14 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
         return _hook_output(message=f"Ревью НЕ ПРОЙДЕНО: лимит раундов ({cfg.max_review_rounds}). "
                             f"Отчёт: {state.get('last_report', '')}")
     findings = run_review(repo, files, cfg, state.get("previous_message", ""))
-    # Отслеживаем только обновление того же потока App Server, НЕ состояние Git.
-    latest = get_turn(session, turn_id, home).get("diff", "")
-    if sha256("".join(f.diff for f in code_changes(latest, cfg)).encode()).hexdigest() != digest:
+    # При ревью могли прийти новые операции apply_patch того же хода.
+    latest = code_changes(repo, session, turn_id, cfg, home)
+    if sha256("".join(f.diff for f in latest).encode()).hexdigest() != digest:
         report = _save_report(repo, session, turn_id, cfg, home, digest, [],
                               "stale_review", state.get("rounds", 0))
         state.update(status="stale_review", last_report=str(report), updated_at=_timestamp())
         write(path, state)
-        return _hook_output("block", "Diff App Server изменился во время ревью. "
+        return _hook_output("block", "Список успешных apply_patch изменился во время ревью. "
                             "Повторите проверку последнего события. "
                             f"[codex-auto-review-continuation:{state.get('continuation_token', '')}]")
     blocking = [x for x in findings if x.priority in cfg.blocking_priorities
@@ -239,6 +254,7 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
     reports = state.get("reports_by_diff", {})
     reports[cache_key] = str(report)
     state.update(reviewed=reviewed, reports_by_diff=reports, rounds=round_no,
+                 no_fix_attempts=0,
                  status=status, last_report=str(report), last_findings=len(findings),
                  unresolved_findings=bool(blocking),
                  changed_files=len({f.path for f in files}), updated_at=_timestamp())
@@ -259,26 +275,6 @@ def _stop_locked(repo: Path, session: str, turn_id: str, path: Path,
     )
 
 
-def manual_review(repo: Path, session: str, turn_id: str,
-                  home: Path | None = None, force: bool = True) -> dict:
-    """Ручной запуск ТОЛЬКО по ранее сохранённому diff App Server, не HEAD."""
-    cfg = load_config(repo, home)
-    observed = get_turn(session, turn_id, home)
-    files = code_changes(observed.get("diff", ""), cfg)
-    if not files:
-        return {"status": "no_code_changes", "findings": []}
-    if not force and not significant(files, cfg):
-        return {"status": "insignificant", "findings": []}
-    findings = run_review(repo, files, cfg)
-    blocking = [f for f in findings if f.priority in cfg.blocking_priorities
-                and f.confidence >= cfg.confidence_threshold]
-    digest = sha256("".join(f.diff for f in files).encode()).hexdigest()
-    status = "blocked" if blocking else "passed"
-    report = _save_report(repo, session, turn_id, cfg, home, digest, findings, status, 1)
-    return {"status": status, "report": str(report),
-            "findings": [asdict(f) for f in findings]}
-
-
 def _record_hook_event(event: str, home: Path | None) -> None:
     path = (home or HOME_DIR) / "hook-events.json"
     try:
@@ -297,13 +293,17 @@ def handle(event: str, payload: dict, home: Path | None = None) -> dict:
     session = str(payload.get("session_id") or payload.get("thread_id") or "")
     turn_id = str(payload.get("turn_id") or "")
     if not session:
-        return _hook_output(message="Нет session_id/thread_id: нельзя связать App Server diff с ходом.")
+        return _hook_output(message="Нет session_id: нельзя связать правки apply_patch с ходом.")
     try:
         repo = repo_root(Path(payload.get("cwd") or os.getcwd()))
-    except (AppServerError, OSError):
+    except (CaptureError, OSError):
         return {}
     if event == "UserPromptSubmit":
         return submit(repo, session, str(payload.get("prompt", "")), home, turn_id)
+    if event == "PostToolUse":
+        if payload.get("tool_name") == "apply_patch":
+            record_patch(payload, repo, home)
+        return {}
     if event == "Stop":
         return stop(repo, session, home, turn_id)
     raise ValueError(f"Неизвестное событие хука: {event}")

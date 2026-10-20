@@ -14,6 +14,9 @@ def test_install_preserves_other_hooks_and_uninstall(tmp_path: Path) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert len(payload["hooks"]["Stop"]) == 2
     assert len(payload["hooks"]["UserPromptSubmit"]) == 1
+    assert len(payload["hooks"]["PostToolUse"]) == 1
+    assert payload["hooks"]["PostToolUse"][0]["matcher"] == "^apply_patch$"
+    assert _owned(payload["hooks"]["PostToolUse"][0])
     assert any(_owned(x) for x in payload["hooks"]["Stop"])
     status = next(h for group in payload["hooks"]["Stop"]
                   for h in group["hooks"] if "codex_auto_review.cli" in h.get("command", ""))
@@ -24,6 +27,7 @@ def test_install_preserves_other_hooks_and_uninstall(tmp_path: Path) -> None:
     uninstall(path)
     assert json.loads(path.read_text(encoding="utf-8"))["hooks"]["Stop"] == other["hooks"]["Stop"]
     assert json.loads(path.read_text(encoding="utf-8"))["hooks"]["SessionStart"] == other["hooks"]["SessionStart"]
+    assert json.loads(path.read_text(encoding="utf-8"))["hooks"]["PostToolUse"] == []
 
 
 def test_config_overrides(repo: Path, tmp_path: Path) -> None:
