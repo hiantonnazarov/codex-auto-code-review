@@ -170,3 +170,35 @@ def test_doctor_tracks_observed_stop(monkeypatch, tmp_path: Path) -> None:
     info = cli._doctor()["hook_events_observed"]
     assert info["stop_delivery_confirmed"] is True
     assert info["last_Stop"] == "2026-10-20"
+
+
+def test_preexisting_uncommitted_code_is_out_of_review_scope(
+    monkeypatch, repo: Path, tmp_path: Path
+) -> None:
+    import codex_auto_review.engine as engine
+    (tmp_path / "config.toml").write_text('[review]\nmode="all"\n', encoding="utf-8")
+    (repo / "x.py").write_text("already = 1\n")  # Изменение ДО пользовательского хода
+    env = {"cwd": str(repo), "session_id": "existing", "turn_id": "first", "prompt": "Новый файл"}
+    handle("UserPromptSubmit", env, tmp_path)
+    (repo / "new.py").write_text("new = 2\n")
+    captured = []
+    monkeypatch.setattr(engine, "run_review", lambda r, b, h, files, *args: captured.extend(files) or [])
+    assert "ПРОЙДЕНО" in handle("Stop", env, tmp_path)["systemMessage"]
+    assert [c.path for c in captured] == ["new.py"]
+
+
+def test_binary_edit_significant_under_default_policy(repo: Path) -> None:
+    before = snapshot(repo)
+    (repo / "binary.py").write_bytes(b"\x00\x01\x02")
+    actual = changes(repo, before, snapshot(repo))
+    assert len(actual) == 1 and actual[0].binary
+    assert significant(actual, Config())
+
+
+def test_ownership_detection_does_not_delete_foreign_commands() -> None:
+    from codex_auto_review.cli import _owned
+    assert not _owned({"hooks": [{"type": "command",
+                                 "command": "echo 'codex_auto_review.cli hook Stop'"}]})
+    assert not _owned({"hooks": None})
+    assert _owned({"hooks": [{"type": "command",
+                             "command": "python -m codex_auto_review.cli hook Stop"}]})
